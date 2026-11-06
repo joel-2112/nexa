@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.core.dependencies import CurrentUserId, DbSession
 from app.core.exceptions import NotFoundError, ValidationError, http_bad_request, http_not_found
@@ -70,11 +70,12 @@ async def update_event(
         raise http_not_found(exc.detail)
 
 
-@router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
-@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_event(event_id: UUID, user_id: CurrentUserId, db: DbSession) -> None:
+@router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+async def delete_event(event_id: UUID, user_id: CurrentUserId, db: DbSession) -> Response:
     svc = CalendarService(db)
     try:
         await svc.delete_event(event_id, user_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     except NotFoundError as exc:
         raise http_not_found(exc.detail)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.core.dependencies import CurrentUserId, DbSession
 from app.core.exceptions import NotFoundError, http_not_found
@@ -57,10 +57,11 @@ async def update_contact(
         raise http_not_found(exc.detail)
 
 
-@router.delete("/{contact_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_contact(contact_id: UUID, user_id: CurrentUserId, db: DbSession) -> None:
+@router.delete("/{contact_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+async def delete_contact(contact_id: UUID, user_id: CurrentUserId, db: DbSession) -> Response:
     svc = ContactService(db)
     try:
         await svc.delete_contact(contact_id, user_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     except NotFoundError as exc:
         raise http_not_found(exc.detail)

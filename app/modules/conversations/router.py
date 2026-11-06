@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.core.dependencies import CurrentUserId, DbSession
 from app.core.exceptions import NotFoundError, http_not_found
@@ -85,14 +85,15 @@ async def add_message(
     )
 
 
-@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 async def archive_conversation(
     conversation_id: UUID,
     user_id: CurrentUserId,
     db: DbSession,
-) -> None:
+) -> Response:
     svc = ConversationService(db)
     try:
         await svc.archive(conversation_id, user_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     except NotFoundError as exc:
         raise http_not_found(exc.message)

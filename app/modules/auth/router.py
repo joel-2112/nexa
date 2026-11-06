@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Request, Response, status
 
 from app.core.dependencies import CurrentUserId, DbSession
 from app.core.exceptions import (
@@ -74,18 +74,20 @@ async def refresh(payload: RefreshRequest, db: DbSession) -> TokenResponse:
     return tokens
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(payload: RefreshRequest, db: DbSession) -> None:
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+async def logout(payload: RefreshRequest, db: DbSession) -> Response:
     """Revoke the given refresh token."""
     svc = AuthService(db)
     await svc.logout(payload.refresh_token)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/logout-all", status_code=status.HTTP_204_NO_CONTENT)
-async def logout_all(user_id: CurrentUserId, db: DbSession) -> None:
+@router.post("/logout-all", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+async def logout_all(user_id: CurrentUserId, db: DbSession) -> Response:
     """Revoke all refresh tokens for the current user."""
     svc = AuthService(db)
     await svc.logout_all(user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/me", response_model=UserResponse)

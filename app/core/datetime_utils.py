@@ -34,3 +34,4 @@ def parse_datetime(val: Any) -> datetime:
         return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     except Exception as exc:
         raise ValueError(f"Unable to parse datetime from '{val}': {exc}") from exc
+

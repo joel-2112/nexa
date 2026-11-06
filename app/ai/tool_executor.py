@@ -105,6 +105,8 @@ class ToolExecutor:
             return await self._send_email_invitation(args, user)
         elif tool_name == "schedule_reminder":
             return await self._schedule_reminder(args, user)
+        elif tool_name == "find_free_slots":
+            return await self._find_free_slots(args, user)
         else:
             raise ToolExecutionError(f"No execution handler implemented for tool: {tool_name}")
 
@@ -318,4 +320,50 @@ class ToolExecutor:
             "event_title": title,
             "remind_at": remind_at.isoformat(),
             "channel": channel,
+        }
+
+    async def _find_free_slots(self, args: dict[str, Any], user: User) -> dict[str, Any]:
+        from datetime import UTC, datetime, time, timedelta
+        target_date = parser.parse(args["date"]).date()
+        duration_minutes = int(args.get("duration_minutes", 60))
+
+        start_of_day = datetime.combine(target_date, time(9, 0), tzinfo=UTC)
+        end_of_day = datetime.combine(target_date, time(18, 0), tzinfo=UTC)
+
+        stmt = select(CalendarEvent).where(
+            CalendarEvent.owner_id == user.id,
+            CalendarEvent.status == CalendarEventStatus.scheduled,
+            CalendarEvent.start_at < end_of_day,
+            CalendarEvent.end_at > start_of_day,
+        ).order_by(CalendarEvent.start_at.asc())
+
+        busy_events = (await self.db.execute(stmt)).scalars().all()
+
+        free_slots = []
+        current = start_of_day
+        step = timedelta(minutes=duration_minutes)
+
+        for event in busy_events:
+            event_start = event.start_at if event.start_at.tzinfo else event.start_at.replace(tzinfo=UTC)
+            event_end = event.end_at if event.end_at.tzinfo else event.end_at.replace(tzinfo=UTC)
+
+            if event_start - current >= step:
+                free_slots.append({
+                    "start": current.isoformat(),
+                    "end": (current + step).isoformat(),
+                })
+            if event_end > current:
+                current = event_end
+
+        if end_of_day - current >= step:
+            free_slots.append({
+                "start": current.isoformat(),
+                "end": (current + step).isoformat(),
+            })
+
+        return {
+            "date": target_date.isoformat(),
+            "duration_minutes": duration_minutes,
+            "available_slots": free_slots[:5],
+            "total_slots_found": len(free_slots),
         }

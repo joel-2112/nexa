@@ -192,3 +192,24 @@ tool_registry.register(
     },
     requires_approval=True,
 )
+
+tool_registry.register(
+    name="find_free_slots",
+    description="Find available open meeting slots within working hours for a given day or date range.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "date": {
+                "type": "string",
+                "description": "ISO 8601 date (e.g. '2026-11-07') to find available slots for",
+            },
+            "duration_minutes": {
+                "type": "integer",
+                "description": "Desired meeting duration in minutes (e.g. 30, 45, 60)",
+                "default": 60,
+            },
+        },
+        "required": ["date"],
+    },
+    requires_approval=False,
+)

@@ -118,3 +118,16 @@ async def test_action_plan_approval_and_rejection_workflow(auth_client: AsyncCli
     assert approve_res.status_code == 200
     assert approve_res.json()["status"] == "approved"
     assert approve_res.json()["approved_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_find_free_slots_tool(db_session, test_user):
+    executor = ToolExecutor(db_session)
+    res = await executor.execute(
+        tool_name="find_free_slots",
+        arguments={"date": "2026-11-15", "duration_minutes": 60},
+        user=test_user,
+    )
+    assert res["date"] == "2026-11-15"
+    assert "available_slots" in res
+    assert len(res["available_slots"]) > 0

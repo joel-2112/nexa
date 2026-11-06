@@ -258,6 +258,55 @@ class TelegramBotService:
             content, markup = render_help_view(user)
             await self.send_message(chat_id, content, reply_markup=markup)
             return
+        elif clean_text in ["approve", "approved", "yes", "confirm", "approve plan"]:
+            from app.db.models import ActionPlan, ActionPlanStatus
+            from app.modules.action_plans.service import ActionPlanService
+
+            plan_stmt = (
+                select(ActionPlan)
+                .where(ActionPlan.user_id == user.id, ActionPlan.status == ActionPlanStatus.pending_approval)
+                .order_by(ActionPlan.created_at.desc())
+                .limit(1)
+            )
+            latest_plan = (await db.execute(plan_stmt)).scalar_one_or_none()
+            if latest_plan:
+                svc = ActionPlanService(db)
+                await svc.approve_plan(latest_plan.id, user.id)
+                await self.send_message(
+                    chat_id,
+                    f"✅ <b>Action Plan '{latest_plan.title}' Approved!</b>\n\n"
+                    "NEXA is now executing your scheduled steps in the background. "
+                    "You will be notified once execution completes.",
+                    reply_markup=get_persistent_reply_keyboard(),
+                )
+                return
+            else:
+                await self.send_message(
+                    chat_id,
+                    "ℹ️ No action plans are currently awaiting your approval.",
+                    reply_markup=get_persistent_reply_keyboard(),
+                )
+                return
+        elif clean_text in ["reject", "no", "cancel plan", "reject plan"]:
+            from app.db.models import ActionPlan, ActionPlanStatus
+            from app.modules.action_plans.service import ActionPlanService
+
+            plan_stmt = (
+                select(ActionPlan)
+                .where(ActionPlan.user_id == user.id, ActionPlan.status == ActionPlanStatus.pending_approval)
+                .order_by(ActionPlan.created_at.desc())
+                .limit(1)
+            )
+            latest_plan = (await db.execute(plan_stmt)).scalar_one_or_none()
+            if latest_plan:
+                svc = ActionPlanService(db)
+                await svc.reject_plan(latest_plan.id, user.id, reason="Rejected via chat")
+                await self.send_message(
+                    chat_id,
+                    f"❌ <b>Action Plan '{latest_plan.title}' Rejected.</b> No external actions were taken.",
+                    reply_markup=get_persistent_reply_keyboard(),
+                )
+                return
 
         # Route message into the AI conversation engine
         await self._process_user_message(user, text, chat_id, db)

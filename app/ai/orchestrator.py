@@ -130,6 +130,11 @@ class NexaOrchestrator:
             )
             self.db.add(assistant_msg)
             conversation.message_count += 1
+
+            # Clear state so the conversation starts fresh for the next instruction
+            conversation.current_intent = None
+            conversation.collected_data = {}
+            conversation.pending_questions = []
             await self.db.flush()
 
             return OrchestratorResponse(
@@ -178,6 +183,11 @@ class NexaOrchestrator:
             )
             self.db.add(assistant_msg)
             conversation.message_count += 1
+
+            # Clear state so the conversation starts fresh for the next instruction
+            conversation.current_intent = None
+            conversation.collected_data = {}
+            conversation.pending_questions = []
             await self.db.flush()
 
             return OrchestratorResponse(
@@ -248,8 +258,9 @@ class NexaOrchestrator:
         lower = text.lower()
         entities: dict[str, Any] = {}
 
-        # Preserve active conversation intent if in follow-up mode
-        if conversation.current_intent == IntentType.SCHEDULE_MEETING.value:
+        # Only preserve active intent if actively answering pending follow-up questions
+        has_pending = bool(conversation.pending_questions)
+        if has_pending and conversation.current_intent == IntentType.SCHEDULE_MEETING.value:
             intent = IntentType.SCHEDULE_MEETING
         elif any(w in lower for w in ["meeting", "schedule", "meet", "call", "client", "appointment"]):
             intent = IntentType.SCHEDULE_MEETING

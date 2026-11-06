@@ -334,7 +334,7 @@ async def render_integrations_view(user: User, db: AsyncSession) -> tuple[str, d
 
     # Get service URL (Render URL)
     base_url = "https://nexa-1jwm.onrender.com"
-    connect_url = f"{base_url}/api/v1/integrations/google/connect"
+    connect_url = f"{base_url}/api/v1/integrations/google/connect-browser?token={user.id}"
 
     if google_acc:
         lines.append(f"   • Status: ✅ <b>Connected</b> ({google_acc.email})")

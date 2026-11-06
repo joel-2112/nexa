@@ -137,10 +137,10 @@ class NexaPlanner:
         if start_time:
             from datetime import timedelta
 
-            from dateutil import parser
+            from app.core.datetime_utils import parse_datetime
 
             try:
-                dt_start = parser.parse(start_time)
+                dt_start = parse_datetime(start_time)
                 dt_remind = dt_start - timedelta(minutes=10)
                 remind_str = dt_remind.isoformat()
             except Exception:

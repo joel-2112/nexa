@@ -6,11 +6,11 @@ import time
 import uuid
 from typing import Any
 
-from dateutil import parser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.tool_registry import tool_registry
+from app.core.datetime_utils import parse_datetime
 from app.core.exceptions import ApprovalRequiredError, ToolExecutionError
 from app.core.logging import get_logger
 from app.db.models import (
@@ -111,8 +111,8 @@ class ToolExecutor:
             raise ToolExecutionError(f"No execution handler implemented for tool: {tool_name}")
 
     async def _check_availability(self, args: dict[str, Any], user: User) -> dict[str, Any]:
-        start = parser.parse(args["start_time"])
-        end = parser.parse(args["end_time"])
+        start = parse_datetime(args["start_time"])
+        end = parse_datetime(args["end_time"])
 
         # Check local calendar events first
         stmt = select(CalendarEvent).where(
@@ -146,8 +146,8 @@ class ToolExecutor:
         }
 
     async def _create_calendar_event(self, args: dict[str, Any], user: User) -> dict[str, Any]:
-        start = parser.parse(args["start_time"])
-        end = parser.parse(args["end_time"])
+        start = parse_datetime(args["start_time"])
+        end = parse_datetime(args["end_time"])
         title = args["title"]
         desc = args.get("description")
         loc = args.get("location")
@@ -205,7 +205,7 @@ class ToolExecutor:
         }
 
     async def _create_task(self, args: dict[str, Any], user: User) -> dict[str, Any]:
-        due_at = parser.parse(args["due_date"]) if args.get("due_date") else None
+        due_at = parse_datetime(args["due_date"]) if args.get("due_date") else None
         priority_str = args.get("priority", "medium")
         try:
             priority = TaskPriority(priority_str.lower())
@@ -292,7 +292,7 @@ class ToolExecutor:
             return {"status": "queued", "to": to_email, "note": "Email recorded; Gmail integration pending."}
 
     async def _schedule_reminder(self, args: dict[str, Any], user: User) -> dict[str, Any]:
-        remind_at = parser.parse(args["remind_at"])
+        remind_at = parse_datetime(args["remind_at"])
         title = args["event_title"]
         channel = args.get("channel", "telegram")
 
@@ -324,7 +324,7 @@ class ToolExecutor:
 
     async def _find_free_slots(self, args: dict[str, Any], user: User) -> dict[str, Any]:
         from datetime import UTC, datetime, time, timedelta
-        target_date = parser.parse(args["date"]).date()
+        target_date = parse_datetime(args["date"]).date()
         duration_minutes = int(args.get("duration_minutes", 60))
 
         start_of_day = datetime.combine(target_date, time(9, 0), tzinfo=UTC)

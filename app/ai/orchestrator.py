@@ -7,7 +7,6 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from dateutil import parser
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.agent import NexaAgent
@@ -17,6 +16,7 @@ from app.ai.prompts.system import SYSTEM_ORCHESTRATOR_PROMPT
 from app.ai.schemas import ExtractedIntent, IntentType, OrchestratorResponse
 from app.ai.tool_executor import ToolExecutor
 from app.ai.tool_registry import tool_registry
+from app.core.datetime_utils import parse_datetime
 from app.core.exceptions import AIError
 from app.core.logging import get_logger
 from app.db.models import Conversation, Message, MessageRole, User
@@ -282,7 +282,7 @@ class NexaOrchestrator:
             try:
                 # E.g. 12:00 PM or 2:00 PM
                 t_str = data["time_raw"]
-                parsed_t = parser.parse(t_str)
+                parsed_t = parse_datetime(t_str)
                 start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
             except Exception:
                 pass

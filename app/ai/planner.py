@@ -182,28 +182,41 @@ class NexaPlanner:
         due_date = entities.get("due_date")
         priority = entities.get("priority", "medium")
 
+        steps = [
+            ActionStep(
+                step_order=1,
+                tool_name="create_task",
+                description=f"Add task '{title}' to user task list",
+                arguments={"title": title, "due_date": due_date, "priority": priority},
+                requires_approval=True,
+                status=ActionStepStatus.pending,
+            )
+        ]
+
+        remind_at = entities.get("remind_at") or due_date
+        if remind_at:
+            steps.append(
+                ActionStep(
+                    step_order=2,
+                    tool_name="schedule_reminder",
+                    description=f"Schedule reminder notification for '{title}'",
+                    arguments={"event_title": title, "remind_at": remind_at, "channel": "telegram", "type": "task"},
+                    requires_approval=True,
+                    status=ActionStepStatus.pending,
+                )
+            )
+
         plan = ActionPlan(
             user_id=user.id,
             conversation_id=conversation.id if conversation else None,
-            title=f"Create Task: {title}",
+            title=f"Task: {title}",
             description=f"Task creation for '{title}' (Priority: {priority}, Due: {due_date})",
             intent=intent.intent.value,
             status=ActionPlanStatus.pending_approval,
             plan_data=entities,
+            steps=steps,
         )
         self.db.add(plan)
-        await self.db.flush()
-
-        step = ActionStep(
-            plan_id=plan.id,
-            step_order=1,
-            tool_name="create_task",
-            description=f"Add task '{title}' to user task list",
-            arguments={"title": title, "due_date": due_date, "priority": priority},
-            requires_approval=True,
-            status=ActionStepStatus.pending,
-        )
-        self.db.add(step)
         await self.db.flush()
         return plan
 

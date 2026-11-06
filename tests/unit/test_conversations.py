@@ -58,4 +58,21 @@ async def test_contextual_meeting_follow_up_workflow(auth_client: AsyncClient):
     data3 = msg3_res.json()
     # Now that all info is gathered, an action plan is proposed and approval is requested!
     assert data3["action_plan_id"] is not None
-    assert "action plan" in data3["message"]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_task_and_reminder_creation_workflow(auth_client: AsyncClient):
+    """Verify that NEXA creates a task and schedules a reminder from relative time statements."""
+    create_res = await auth_client.post("/api/v1/conversations", json={"title": "Task Planning"})
+    conv_id = create_res.json()["id"]
+
+    msg_res = await auth_client.post(
+        f"/api/v1/conversations/{conv_id}/messages",
+        json={"content": "after 20 minutes i will have the task to check my email"},
+    )
+    assert msg_res.status_code == 201
+    data = msg_res.json()
+    assert data["action_plan_id"] is not None
+    assert "Check my email" in data["message"]["content"]
+    assert "Schedule Telegram notification" in data["message"]["content"]
+    assert "action plan" in data["message"]["content"].lower()

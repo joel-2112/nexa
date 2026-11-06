@@ -138,6 +138,54 @@ class NexaOrchestrator:
                 clarification_needed=False,
             )
 
+        elif extracted.intent == IntentType.CREATE_TASK:
+            plan = await self.planner.create_action_plan(extracted, user, conversation)
+            due_iso = extracted.entities.get("due_date") or extracted.entities.get("remind_at")
+
+            def _format_display_dt_local(val: str | None) -> str:
+                if not val:
+                    return "No due date"
+                try:
+                    dt = parse_datetime(val)
+                    return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip()
+                except Exception:
+                    return str(val)
+
+            due_display = _format_display_dt_local(due_iso)
+            task_title = extracted.entities.get("title", "New Task")
+            prio = extracted.entities.get("priority", "medium").capitalize()
+
+            steps_text = f"1. Add '{task_title}' to your task list (Priority: {prio})\n"
+            if due_iso:
+                steps_text += f"2. Schedule Telegram notification for {due_display}"
+
+            summary = (
+                f"I've prepared an execution plan for your task:\n\n"
+                f"📋 **Action Plan:** {plan.title}\n"
+                f"- **Task:** {task_title}\n"
+                f"- **Priority:** {prio}\n"
+                f"- **Scheduled For:** {due_display}\n\n"
+                f"**Planned Steps:**\n"
+                f"{steps_text}\n\n"
+                f"⚠️ *Please reply **Approve** or tap the button below to confirm.*"
+            )
+
+            assistant_msg = Message(
+                conversation_id=conversation.id,
+                role=MessageRole.assistant,
+                content=summary,
+                ai_metadata={"action_plan_id": str(plan.id)},
+            )
+            self.db.add(assistant_msg)
+            conversation.message_count += 1
+            await self.db.flush()
+
+            return OrchestratorResponse(
+                response_text=summary,
+                action_plan_id=plan.id,
+                clarification_needed=False,
+            )
+
         # 4. Standard completion for general queries or direct assistance
         messages = await self.context_mgr.build_context_messages(
             conversation=conversation,
@@ -205,11 +253,53 @@ class NexaOrchestrator:
             intent = IntentType.SCHEDULE_MEETING
         elif any(w in lower for w in ["meeting", "schedule", "meet", "call", "client", "appointment"]):
             intent = IntentType.SCHEDULE_MEETING
-        elif any(w in lower for w in ["task", "todo", "remind me to", "prepare"]):
+        elif any(w in lower for w in ["task", "todo", "remind me", "remind", "prepare task", "check my email", "check email"]):
             intent = IntentType.CREATE_TASK
-            entities["title"] = text
         else:
             intent = IntentType.GENERAL_QUERY
+
+        if intent == IntentType.CREATE_TASK:
+            now = datetime.now(UTC)
+            offset_match = re.search(r"(?:in|after)\s+(\d+)\s*(min(?:ute)?s?|hours?|hrs?|days?)", lower)
+            if offset_match:
+                val = int(offset_match.group(1))
+                unit = offset_match.group(2)
+                if "min" in unit:
+                    due_dt = now + timedelta(minutes=val)
+                elif "hour" in unit or "hr" in unit:
+                    due_dt = now + timedelta(hours=val)
+                elif "day" in unit:
+                    due_dt = now + timedelta(days=val)
+                else:
+                    due_dt = now + timedelta(minutes=val)
+                entities["due_date"] = due_dt.isoformat()
+                entities["remind_at"] = due_dt.isoformat()
+
+            # Clean task title
+            title = text
+            title = re.sub(r"(?:in|after)\s+\d+\s*(?:min(?:ute)?s?|hours?|hrs?|days?)", "", title, flags=re.IGNORECASE)
+            for b in [
+                r"i\s+will\s+have\s+the\s+task\s+to\b",
+                r"i\s+have\s+a\s+task\s+to\b",
+                r"task\s+to\b",
+                r"remind\s+me\s+to\b",
+                r"remind\s+me\b",
+                r"add\s+task:?\b",
+                r"create\s+task:?\b",
+                r"please\b",
+            ]:
+                title = re.sub(b, "", title, flags=re.IGNORECASE)
+            clean_title = title.strip(" :,-.").capitalize()
+            entities["title"] = clean_title or text
+
+            if "urgent" in lower or "asap" in lower:
+                entities["priority"] = "urgent"
+            elif "high" in lower:
+                entities["priority"] = "high"
+            elif "low" in lower:
+                entities["priority"] = "low"
+            else:
+                entities["priority"] = "medium"
 
         # Email detection
         email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)

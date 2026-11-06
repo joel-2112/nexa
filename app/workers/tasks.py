@@ -65,11 +65,21 @@ def send_scheduled_reminder_task(self, job_id_str: str) -> dict[str, str]:
                     from app.integrations.telegram.bot import TelegramBotService
 
                     bot = TelegramBotService()
-                    await bot.send_meeting_reminder(
-                        chat_id=user.telegram_id,
-                        title=title,
-                        start_time=job.scheduled_at.strftime("%Y-%m-%d %H:%M UTC"),
-                    )
+                    if data.get("type") == "task":
+                        await bot.send_task_reminder(
+                            chat_id=user.telegram_id,
+                            title=title,
+                            due_date=job.scheduled_at.strftime("%b %d, %Y at %I:%M %p UTC"),
+                            priority=data.get("priority", "medium"),
+                        )
+                        body_msg = f"Task reminder: {title}"
+                    else:
+                        await bot.send_meeting_reminder(
+                            chat_id=user.telegram_id,
+                            title=title,
+                            start_time=job.scheduled_at.strftime("%b %d, %Y at %I:%M %p UTC"),
+                        )
+                        body_msg = f"Meeting reminder: {title}"
 
                     # Record delivery
                     delivery = NotificationDelivery(
@@ -77,7 +87,7 @@ def send_scheduled_reminder_task(self, job_id_str: str) -> dict[str, str]:
                         job_id=job.id,
                         channel=NotificationChannel.telegram,
                         status=NotificationStatus.sent,
-                        body=f"Meeting reminder: {title}",
+                        body=body_msg,
                         sent_at=datetime.now(UTC),
                     )
                     db.add(delivery)

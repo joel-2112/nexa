@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 from uuid import UUID
 
@@ -15,6 +17,33 @@ from app.core.logging import get_logger
 from app.db.models import Conversation, User
 
 logger = get_logger(__name__)
+
+
+def format_to_telegram_html(text: str) -> str:
+    """Convert Markdown elements into Telegram-supported HTML tags."""
+    if not text:
+        return ""
+
+    # Check if text already contains valid Telegram HTML tags
+    has_html_tags = bool(re.search(r"</?(?:b|i|u|s|code|pre|a|blockquote)>", text, re.IGNORECASE))
+    s = text if has_html_tags else html.escape(text, quote=False)
+
+    # 1. Code blocks: ```language\ncode``` -> <pre>code</pre>
+    s = re.sub(r"```[a-zA-Z0-9_]*\n?(.*?)```", r"<pre>\1</pre>", s, flags=re.DOTALL)
+    # 2. Inline code: `code` -> <code>code</code>
+    s = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", s)
+    # 3. Bold: **text** or __text__ -> <b>text</b>
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"__(.+?)__", r"<b>\1</b>", s)
+    # 4. Italic: *text* or _text_ -> <i>text</i>
+    s = re.sub(r"(?<!\w)\*([^*\n]+?)\*(?!\w)", r"<i>\1</i>", s)
+    s = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", s)
+    # 5. Bullet list items: lines starting with "- " or "* " -> "• "
+    s = re.sub(r"^\s*[-*]\s+", "• ", s, flags=re.MULTILINE)
+    # 6. Markdown links: [text](url) -> <a href="url">text</a>
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r'<a href="\2">\1</a>', s)
+
+    return s
 
 
 class TelegramBotService:
@@ -36,9 +65,11 @@ class TelegramBotService:
     ) -> dict[str, Any]:
         self._ensure_configured()
         url = f"{self.base_url}/sendMessage"
+
+        formatted_text = format_to_telegram_html(text) if parse_mode == "HTML" else text
         payload: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text,
+            "text": formatted_text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": False,
         }
@@ -48,6 +79,15 @@ class TelegramBotService:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, json=payload)
             if resp.status_code != 200:
+                # If Telegram rejected the HTML entities, fallback to sending plain unformatted text
+                if "parse entities" in resp.text.lower() or "bad request" in resp.text.lower():
+                    logger.warning("telegram_html_parse_failed_falling_back_plain", error=resp.text)
+                    payload["text"] = text
+                    del payload["parse_mode"]
+                    retry_resp = await client.post(url, json=payload)
+                    if retry_resp.status_code == 200:
+                        return retry_resp.json()
+
                 logger.error("telegram_send_failed", status=resp.status_code, body=resp.text)
                 raise IntegrationError(f"Telegram error: {resp.text}", provider="telegram")
             return resp.json()

@@ -93,11 +93,23 @@ class NexaOrchestrator:
 
             plan = await self.planner.create_action_plan(extracted, user, conversation)
 
+            def _format_display_dt(val: str | None) -> str:
+                if not val:
+                    return "Not set"
+                try:
+                    dt = parse_datetime(val)
+                    return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip()
+                except Exception:
+                    return str(val)
+
+            start_display = _format_display_dt(all_collected.get("start_time"))
+            end_display = _format_display_dt(all_collected.get("end_time"))
+
             summary = (
                 f"I've prepared an execution plan for your meeting:\n\n"
                 f"📋 **Action Plan:** {plan.title}\n"
-                f"- **Start Time:** {all_collected.get('start_time')}\n"
-                f"- **End Time:** {all_collected.get('end_time')}\n"
+                f"- **Start Time:** {start_display}\n"
+                f"- **End Time:** {end_display}\n"
                 f"- **Client:** {all_collected.get('client_name')} ({all_collected.get('client_email')})\n"
                 f"- **Topic:** {all_collected.get('topic')}\n\n"
                 f"**Planned Steps:**\n"

@@ -38,14 +38,22 @@ class ActionPlanService:
         if not approved_plan:
             raise ValidationError("Failed to approve action plan")
 
-        # In production, dispatch background execution task via Celery
+        # Execute plan steps in background
+        dispatched_celery = False
         try:
             from app.workers.tasks import execute_approved_plan
 
             execute_approved_plan.delay(str(plan_id), str(user_id))
+            dispatched_celery = True
         except Exception:
-            # If celery broker is offline or during testing, plan stays approved
             pass
+
+        if not dispatched_celery:
+            import asyncio
+
+            from app.workers.tasks import execute_plan_async
+
+            asyncio.create_task(execute_plan_async(str(plan_id), str(user_id)))
 
         return approved_plan
 

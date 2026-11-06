@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -14,7 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import IntegrationError, IntegrationNotConfiguredError
 from app.core.logging import get_logger
-from app.db.models import Conversation, User
+from app.db.models import Conversation, Task, TaskStatus, User
+from app.integrations.telegram.views import (
+    get_persistent_reply_keyboard,
+    render_calendar_view,
+    render_dashboard_view,
+    render_help_view,
+    render_integrations_view,
+    render_plans_view,
+    render_tasks_view,
+)
 
 logger = get_logger(__name__)
 
@@ -104,6 +114,40 @@ class TelegramBotService:
             resp = await client.post(url, json=payload)
             return resp.json() if resp.status_code == 200 else {}
 
+    async def edit_message_text(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_configured()
+        url = f"{self.base_url}/editMessageText"
+
+        formatted_text = format_to_telegram_html(text) if parse_mode == "HTML" else text
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": formatted_text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": False,
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code != 200:
+                if "parse entities" in resp.text.lower() or "bad request" in resp.text.lower():
+                    payload["text"] = text
+                    del payload["parse_mode"]
+                    retry_resp = await client.post(url, json=payload)
+                    if retry_resp.status_code == 200:
+                        return retry_resp.json()
+                logger.warning("telegram_edit_message_failed", error=resp.text)
+            return resp.json() if resp.status_code == 200 else {}
+
     async def send_meeting_reminder(
         self,
         chat_id: int | str,
@@ -188,6 +232,33 @@ class TelegramBotService:
             )
             return
 
+        # Check for menu button clicks or slash commands
+        clean_text = text.lower().strip()
+        if clean_text in ["/dashboard", "/menu", "📊 dashboard", "dashboard"]:
+            content, markup = await render_dashboard_view(user, db)
+            await self.send_message(chat_id, content, reply_markup=markup)
+            return
+        elif clean_text in ["/calendar", "📅 calendar", "calendar"]:
+            content, markup = await render_calendar_view(user, db)
+            await self.send_message(chat_id, content, reply_markup=markup)
+            return
+        elif clean_text in ["/tasks", "📝 tasks", "tasks"]:
+            content, markup = await render_tasks_view(user, db)
+            await self.send_message(chat_id, content, reply_markup=markup)
+            return
+        elif clean_text in ["/plans", "📋 plans", "plans"]:
+            content, markup = await render_plans_view(user, db)
+            await self.send_message(chat_id, content, reply_markup=markup)
+            return
+        elif clean_text in ["/integrations", "/status", "🔗 integrations", "integrations", "status"]:
+            content, markup = await render_integrations_view(user, db)
+            await self.send_message(chat_id, content, reply_markup=markup)
+            return
+        elif clean_text in ["/help", "❓ help", "help"]:
+            content, markup = render_help_view(user)
+            await self.send_message(chat_id, content, reply_markup=markup)
+            return
+
         # Route message into the AI conversation engine
         await self._process_user_message(user, text, chat_id, db)
 
@@ -198,6 +269,7 @@ class TelegramBotService:
         telegram_user_id = from_user.get("id")
         message = callback_query.get("message", {})
         chat_id = message.get("chat", {}).get("id")
+        message_id = message.get("message_id")
 
         user = await self._get_linked_user(telegram_user_id, db)
         if not user or not chat_id or not query_id:
@@ -212,12 +284,13 @@ class TelegramBotService:
             try:
                 plan_id = UUID(plan_id_str)
                 await svc.approve_plan(plan_id, user.id)
-                await self.answer_callback_query(query_id, text="Action plan approved and queued for execution!")
+                await self.answer_callback_query(query_id, text="Action plan approved and queued for execution! 🚀")
                 await self.send_message(
                     chat_id,
                     "✅ <b>Action Plan Approved!</b>\n\n"
                     "NEXA is now executing your scheduled steps in the background. "
                     "You will be notified once execution completes.",
+                    reply_markup=get_persistent_reply_keyboard(),
                 )
             except Exception as e:
                 logger.error("telegram_plan_approval_failed", error=str(e))
@@ -229,9 +302,65 @@ class TelegramBotService:
                 plan_id = UUID(plan_id_str)
                 await svc.reject_plan(plan_id, user.id, reason="Rejected via Telegram")
                 await self.answer_callback_query(query_id, text="Action plan cancelled.")
-                await self.send_message(chat_id, "❌ <b>Action Plan Rejected.</b> No external actions were taken.")
+                await self.send_message(
+                    chat_id,
+                    "❌ <b>Action Plan Rejected.</b> No external actions were taken.",
+                    reply_markup=get_persistent_reply_keyboard(),
+                )
             except Exception as e:
                 await self.answer_callback_query(query_id, text=f"Error: {e}", show_alert=True)
+
+        elif data.startswith("done_task:"):
+            task_id_str = data.split("done_task:", 1)[1]
+            try:
+                task_id = UUID(task_id_str)
+                stmt = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+                task = (await db.execute(stmt)).scalar_one_or_none()
+                if task:
+                    task.status = TaskStatus.completed
+                    task.completed_at = datetime.now(UTC)
+                    await db.flush()
+                    await self.answer_callback_query(query_id, text=f"'{task.title[:20]}' completed! 🎉")
+                else:
+                    await self.answer_callback_query(query_id, text="Task not found.", show_alert=True)
+
+                # Re-render tasks view in place
+                content, markup = await render_tasks_view(user, db)
+                if message_id:
+                    await self.edit_message_text(chat_id, message_id, content, reply_markup=markup)
+                else:
+                    await self.send_message(chat_id, content, reply_markup=markup)
+            except Exception as e:
+                logger.error("telegram_task_completion_failed", error=str(e))
+                await self.answer_callback_query(query_id, text=f"Error: {e}", show_alert=True)
+
+        elif data.startswith("nav:"):
+            view_name = data.split("nav:", 1)[1]
+            content: str = ""
+            markup: dict[str, Any] | None = None
+
+            if view_name == "dashboard":
+                await self.answer_callback_query(query_id)
+                content, markup = await render_dashboard_view(user, db)
+            elif view_name == "calendar":
+                await self.answer_callback_query(query_id)
+                content, markup = await render_calendar_view(user, db)
+            elif view_name == "tasks":
+                await self.answer_callback_query(query_id)
+                content, markup = await render_tasks_view(user, db)
+            elif view_name == "plans":
+                await self.answer_callback_query(query_id)
+                content, markup = await render_plans_view(user, db)
+            elif view_name == "integrations":
+                await self.answer_callback_query(query_id)
+                content, markup = await render_integrations_view(user, db)
+            else:
+                return
+
+            if message_id:
+                await self.edit_message_text(chat_id, message_id, content, reply_markup=markup)
+            else:
+                await self.send_message(chat_id, content, reply_markup=markup)
 
     async def _process_account_linking(
         self, token: str, telegram_user_id: int, chat_id: int, db: AsyncSession
@@ -254,8 +383,14 @@ class TelegramBotService:
         await self.send_message(
             chat_id,
             f"✅ <b>Successfully connected!</b>\n\n"
-            f"Welcome back, <b>{user.full_name}</b>. You can now chat with NEXA directly right here.",
+            f"Welcome, <b>{user.full_name}</b>. I am NEXA, your AI personal executive assistant.\n"
+            f"Use the buttons below to navigate or speak to me naturally anytime.",
+            reply_markup=get_persistent_reply_keyboard(),
         )
+
+        # Send dashboard
+        dash_content, dash_markup = await render_dashboard_view(user, db)
+        await self.send_message(chat_id, dash_content, reply_markup=dash_markup)
 
     async def _get_linked_user(self, telegram_user_id: int, db: AsyncSession) -> User | None:
         stmt = select(User).where(User.telegram_id == telegram_user_id)
@@ -305,6 +440,8 @@ class TelegramBotService:
                         ]
                     ]
                 }
+            else:
+                reply_markup = get_persistent_reply_keyboard()
 
             await self.send_message(chat_id, reply.response_text, reply_markup=reply_markup)
         except Exception as exc:
@@ -312,4 +449,5 @@ class TelegramBotService:
             await self.send_message(
                 chat_id,
                 "Sorry, I encountered an error processing your request. Please try again in a moment.",
+                reply_markup=get_persistent_reply_keyboard(),
             )

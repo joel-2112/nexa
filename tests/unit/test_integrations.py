@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
 from httpx import AsyncClient
 
 from app.ai.planner import NexaPlanner
 from app.ai.schemas import ExtractedIntent, IntentType
+from app.core.config import settings
 from app.core.exceptions import IntegrationNotConfiguredError
 from app.db.models import ActionPlanStatus
 from app.integrations.n8n.client import N8nClient
@@ -30,9 +31,10 @@ async def test_integrations_status_reports_unconfigured_gracefully(auth_client: 
 
 @pytest.mark.asyncio
 async def test_google_connect_fails_gracefully_when_unconfigured(auth_client: AsyncClient):
-    response = await auth_client.post("/api/v1/integrations/google/connect")
-    assert response.status_code == 503
-    assert "not configured" in response.json()["detail"].lower()
+    with patch.object(type(settings), "google_configured", new_callable=PropertyMock, return_value=False):
+        response = await auth_client.post("/api/v1/integrations/google/connect")
+        assert response.status_code == 503
+        assert "not configured" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -42,9 +44,10 @@ async def test_telegram_connect_endpoint_or_graceful_response(auth_client: Async
 
 
 def test_n8n_client_raises_when_not_configured():
-    client = N8nClient()
-    with pytest.raises(IntegrationNotConfiguredError):
-        client._ensure_configured()
+    with patch.object(type(settings), "n8n_configured", new_callable=PropertyMock, return_value=False):
+        client = N8nClient()
+        with pytest.raises(IntegrationNotConfiguredError):
+            client._ensure_configured()
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 os.environ["APP_ENV"] = "test"
 os.environ["SECRET_KEY"] = "test-secret-key-at-least-64-characters-long-for-testing-purposes-12345"
 os.environ["JWT_SECRET_KEY"] = "test-jwt-secret-key-at-least-64-characters-long-for-testing-purposes-12345"
-os.environ["ENCRYPTION_KEY"] = "8Z1j-gU5yP6r4oW3xV7zL8mK1nP4qR9tY2uA5cE7wQ8="  # Valid 32-byte Fernet key
+os.environ["ENCRYPTION_KEY"] = "8Z1j-gU5yP6r4oW3xV7zL8mK1nP4qR9tY2uA5cE7wQ8="
+os.environ["GOOGLE_CLIENT_ID"] = ""
+os.environ["GOOGLE_CLIENT_SECRET"] = ""
+os.environ["N8N_API_KEY"] = ""
+os.environ["TELEGRAM_BOT_TOKEN"] = ""  # Valid 32-byte Fernet key
 
 from app.core.dependencies import get_current_user_id
 from app.core.security import create_access_token, hash_password

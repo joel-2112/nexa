@@ -193,10 +193,13 @@ class AIService:
         self.db = db
         self.user_id = user_id
         self.user_timezone = user_timezone
-        self.client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            timeout=settings.OPENAI_TIMEOUT,
-        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": settings.GEMINI_API_KEY or settings.OPENAI_API_KEY,
+            "timeout": settings.OPENAI_TIMEOUT,
+        }
+        if settings.is_gemini_active:
+            client_kwargs["base_url"] = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        self.client = AsyncOpenAI(**client_kwargs)
         self.conv_repo = ConversationRepository(db)
         self.plan_repo = ActionPlanRepository(db)
         self.tool_executor = ToolExecutor(db, user_id)

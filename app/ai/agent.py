@@ -15,8 +15,17 @@ logger = get_logger(__name__)
 
 class NexaAgent:
     def __init__(self) -> None:
-        self.api_key = settings.OPENAI_API_KEY
-        self.model = settings.OPENAI_MODEL
+        if settings.is_gemini_active:
+            self.api_key = settings.GEMINI_API_KEY or settings.OPENAI_API_KEY
+            self.model = settings.GEMINI_MODEL or "gemini-1.5-flash"
+            self.base_url: str | None = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            self.provider = "gemini"
+        else:
+            self.api_key = settings.OPENAI_API_KEY
+            self.model = settings.OPENAI_MODEL
+            self.base_url = settings.OPENAI_BASE_URL
+            self.provider = "openai"
+
         self.temperature = settings.OPENAI_TEMPERATURE
         self.max_tokens = settings.OPENAI_MAX_TOKENS
         self.timeout = settings.OPENAI_TIMEOUT
@@ -25,12 +34,15 @@ class NexaAgent:
     @property
     def client(self) -> AsyncOpenAI:
         if not self.api_key:
-            raise AIError("OpenAI API key is not configured. Please supply OPENAI_API_KEY in .env.")
+            raise AIError("No LLM API key configured. Please set GEMINI_API_KEY or OPENAI_API_KEY in .env.")
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self.api_key,
-                timeout=float(self.timeout),
-            )
+            kwargs: dict[str, Any] = {
+                "api_key": self.api_key,
+                "timeout": float(self.timeout),
+            }
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = AsyncOpenAI(**kwargs)
         return self._client
 
     async def chat_completion(

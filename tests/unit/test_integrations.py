@@ -90,3 +90,64 @@ async def test_telegram_callback_query_approves_action_plan(db_session, test_use
         assert plan.status == ActionPlanStatus.approved
         assert mock_answer.called
         assert mock_send.called
+
+
+@pytest.mark.asyncio
+async def test_unified_navigation_and_remove_keyboard():
+    from app.integrations.telegram.views import get_remove_keyboard, get_unified_nav_keyboard
+
+    # Test remove keyboard
+    assert get_remove_keyboard() == {"remove_keyboard": True}
+
+    # Test unified navigation keyboard for dashboard
+    dash_kb = get_unified_nav_keyboard("dashboard")
+    assert "inline_keyboard" in dash_kb
+    rows = dash_kb["inline_keyboard"]
+    assert len(rows) == 2  # 2 navigation rows
+    # Tab 0 should be active
+    assert rows[0][0]["text"] == "• 📊 Dashboard •"
+    assert rows[0][0]["callback_data"] == "nav:dashboard"
+    assert rows[0][1]["text"] == "📅 Calendar"
+
+    # Test calendar active tab
+    cal_kb = get_unified_nav_keyboard("calendar")
+    cal_rows = cal_kb["inline_keyboard"]
+    assert cal_rows[0][0]["text"] == "📊 Dashboard"
+    assert cal_rows[0][1]["text"] == "• 📅 Calendar •"
+
+
+@pytest.mark.asyncio
+async def test_telegram_nav_callback_edits_message_in_place(db_session, test_user):
+    from unittest.mock import AsyncMock, patch
+
+    from app.integrations.telegram.bot import TelegramBotService
+
+    test_user.telegram_id = 934089557
+    await db_session.flush()
+
+    bot = TelegramBotService()
+
+    with (
+        patch.object(bot, "answer_callback_query", new_callable=AsyncMock) as mock_answer,
+        patch.object(bot, "edit_message_text", new_callable=AsyncMock) as mock_edit,
+    ):
+        update = {
+            "callback_query": {
+                "id": "query-nav-123",
+                "data": "nav:calendar",
+                "from": {"id": test_user.telegram_id},
+                "message": {"chat": {"id": test_user.telegram_id}, "message_id": 888},
+            }
+        }
+        await bot.handle_update(update, db_session)
+
+        assert mock_answer.called
+        assert mock_edit.called
+        call_args = mock_edit.call_args[0]
+        # (chat_id, message_id, content)
+        assert call_args[0] == test_user.telegram_id
+        assert call_args[1] == 888
+        assert "7-Day Calendar" in call_args[2]
+        # reply_markup should have calendar highlighted
+        reply_markup = mock_edit.call_args[1]["reply_markup"]
+        assert "inline_keyboard" in reply_markup

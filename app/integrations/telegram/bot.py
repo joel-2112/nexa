@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 from datetime import UTC, datetime
@@ -17,7 +18,8 @@ from app.core.exceptions import IntegrationError, IntegrationNotConfiguredError
 from app.core.logging import get_logger
 from app.db.models import Conversation, Task, TaskStatus, User
 from app.integrations.telegram.views import (
-    get_persistent_reply_keyboard,
+    get_remove_keyboard,
+    get_unified_nav_keyboard,
     render_calendar_view,
     render_dashboard_view,
     render_help_view,
@@ -148,6 +150,24 @@ class TelegramBotService:
                 logger.warning("telegram_edit_message_failed", error=resp.text)
             return resp.json() if resp.status_code == 200 else {}
 
+    async def set_bot_commands(self) -> dict[str, Any]:
+        """Register the official bot commands in Telegram's native menu."""
+        if not settings.telegram_configured:
+            return {}
+        url = f"{self.base_url}/setMyCommands"
+        commands = [
+            {"command": "dashboard", "description": "📊 Executive Dashboard & Schedule"},
+            {"command": "calendar", "description": "📅 7-Day Calendar & Meet links"},
+            {"command": "tasks", "description": "📝 Interactive Task Manager"},
+            {"command": "plans", "description": "📋 Review Action Plans & Approvals"},
+            {"command": "integrations", "description": "🔗 Google Workspace & Service Status"},
+            {"command": "reset", "description": "🔄 Clear Conversation & Reset Context"},
+            {"command": "help", "description": "❓ Quick Guide, Tips & Commands"},
+        ]
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json={"commands": commands})
+            return resp.json() if resp.status_code == 200 else {}
+
     async def send_meeting_reminder(
         self,
         chat_id: int | str,
@@ -234,29 +254,55 @@ class TelegramBotService:
 
         # Check for menu button clicks or slash commands
         clean_text = text.lower().strip()
-        if clean_text in ["/dashboard", "/menu", "📊 dashboard", "dashboard"]:
-            content, markup = await render_dashboard_view(user, db)
+        is_legacy_button = any(icon in text for icon in ["📊", "📅", "📝", "📋", "🔗", "❓"])
+
+        async def _respond_with_view(render_fn: Any, title_msg: str) -> None:
+            if asyncio.iscoroutinefunction(render_fn):
+                content, markup = await render_fn(user, db)
+            else:
+                content, markup = render_fn(user)
+            if is_legacy_button:
+                # Clear the persistent reply keyboard immediately
+                rm = await self.send_message(chat_id, f"<i>{title_msg}</i>", reply_markup=get_remove_keyboard())
+                msg_id = rm.get("result", {}).get("message_id")
+                if msg_id:
+                    await self.edit_message_text(chat_id, msg_id, content, reply_markup=markup)
+                    return
             await self.send_message(chat_id, content, reply_markup=markup)
+
+        if clean_text in ["/dashboard", "/menu", "📊 dashboard", "dashboard"]:
+            await _respond_with_view(render_dashboard_view, "📊 Loading Executive Dashboard...")
             return
         elif clean_text in ["/calendar", "📅 calendar", "calendar"]:
-            content, markup = await render_calendar_view(user, db)
-            await self.send_message(chat_id, content, reply_markup=markup)
+            await _respond_with_view(render_calendar_view, "📅 Loading 7-Day Schedule...")
             return
         elif clean_text in ["/tasks", "📝 tasks", "tasks"]:
-            content, markup = await render_tasks_view(user, db)
-            await self.send_message(chat_id, content, reply_markup=markup)
+            await _respond_with_view(render_tasks_view, "📝 Loading Task Manager...")
             return
         elif clean_text in ["/plans", "📋 plans", "plans"]:
-            content, markup = await render_plans_view(user, db)
-            await self.send_message(chat_id, content, reply_markup=markup)
+            await _respond_with_view(render_plans_view, "📋 Loading Action Plans...")
             return
         elif clean_text in ["/integrations", "/status", "🔗 integrations", "integrations", "status"]:
-            content, markup = await render_integrations_view(user, db)
-            await self.send_message(chat_id, content, reply_markup=markup)
+            await _respond_with_view(render_integrations_view, "🔗 Loading Services & Integrations...")
             return
         elif clean_text in ["/help", "❓ help", "help"]:
-            content, markup = render_help_view(user)
-            await self.send_message(chat_id, content, reply_markup=markup)
+            await _respond_with_view(render_help_view, "❓ Loading Quick Guide...")
+            return
+        elif clean_text in ["/reset", "reset", "clear", "cancel"]:
+            # Clear any active multi-turn context
+            stmt = select(Conversation).where(Conversation.user_id == user.id, Conversation.title == "Telegram Chat")
+            conv = (await db.execute(stmt)).scalar_one_or_none()
+            if conv:
+                conv.current_intent = None
+                conv.collected_data = {}
+                conv.pending_questions = []
+                await db.flush()
+            await self.send_message(
+                chat_id,
+                "🔄 <b>Conversation Context Cleared.</b>\n\n"
+                "I am ready for your next instruction. What would you like to schedule or accomplish?",
+                reply_markup=get_remove_keyboard(),
+            )
             return
         elif clean_text in ["approve", "approved", "yes", "confirm", "approve plan"]:
             from app.db.models import ActionPlan, ActionPlanStatus
@@ -272,19 +318,24 @@ class TelegramBotService:
             if latest_plan:
                 svc = ActionPlanService(db)
                 await svc.approve_plan(latest_plan.id, user.id)
+                dash_markup = get_unified_nav_keyboard("dashboard", [
+                    [
+                        {"text": "📊 View Dashboard", "callback_data": "nav:dashboard"},
+                        {"text": "📅 View Calendar", "callback_data": "nav:calendar"},
+                    ]
+                ])
                 await self.send_message(
                     chat_id,
                     f"✅ <b>Action Plan '{latest_plan.title}' Approved!</b>\n\n"
-                    "NEXA is now executing your scheduled steps in the background. "
-                    "You will be notified once execution completes.",
-                    reply_markup=get_persistent_reply_keyboard(),
+                    "NEXA has executed your scheduled steps. Review your schedule or tasks below:",
+                    reply_markup=dash_markup,
                 )
                 return
             else:
                 await self.send_message(
                     chat_id,
                     "ℹ️ No action plans are currently awaiting your approval.",
-                    reply_markup=get_persistent_reply_keyboard(),
+                    reply_markup=get_remove_keyboard(),
                 )
                 return
         elif clean_text in ["reject", "no", "cancel plan", "reject plan"]:
@@ -301,10 +352,13 @@ class TelegramBotService:
             if latest_plan:
                 svc = ActionPlanService(db)
                 await svc.reject_plan(latest_plan.id, user.id, reason="Rejected via chat")
+                dash_markup = get_unified_nav_keyboard("plans", [
+                    [{"text": "📊 Return to Dashboard", "callback_data": "nav:dashboard"}]
+                ])
                 await self.send_message(
                     chat_id,
-                    f"❌ <b>Action Plan '{latest_plan.title}' Rejected.</b> No external actions were taken.",
-                    reply_markup=get_persistent_reply_keyboard(),
+                    f"❌ <b>Action Plan '{latest_plan.title}' Cancelled.</b> No external changes were made.",
+                    reply_markup=dash_markup,
                 )
                 return
 
@@ -332,15 +386,33 @@ class TelegramBotService:
             plan_id_str = data.split("approve:", 1)[1]
             try:
                 plan_id = UUID(plan_id_str)
+                await self.answer_callback_query(query_id, text="🚀 Executing action plan...")
+                if message_id:
+                    await self.edit_message_text(
+                        chat_id,
+                        message_id,
+                        "⚙️ <b>Executing Action Plan...</b>\n\n"
+                        "NEXA is setting up your calendar event, generating Google Meet links, "
+                        "and scheduling your tasks right now.",
+                    )
                 await svc.approve_plan(plan_id, user.id)
-                await self.answer_callback_query(query_id, text="Action plan approved and queued for execution! 🚀")
-                await self.send_message(
-                    chat_id,
-                    "✅ <b>Action Plan Approved!</b>\n\n"
-                    "NEXA is now executing your scheduled steps in the background. "
-                    "You will be notified once execution completes.",
-                    reply_markup=get_persistent_reply_keyboard(),
+                success_text = (
+                    "🎉 <b>Action Plan Executed Successfully!</b>\n\n"
+                    "• Calendar event created with Google Meet link\n"
+                    "• Reminder notifications queued\n"
+                    "• Associated tasks recorded\n\n"
+                    "Explore your updated schedule or dashboard below:"
                 )
+                dash_markup = get_unified_nav_keyboard("dashboard", [
+                    [
+                        {"text": "📊 View Dashboard", "callback_data": "nav:dashboard"},
+                        {"text": "📅 View Calendar", "callback_data": "nav:calendar"},
+                    ]
+                ])
+                if message_id:
+                    await self.edit_message_text(chat_id, message_id, success_text, reply_markup=dash_markup)
+                else:
+                    await self.send_message(chat_id, success_text, reply_markup=dash_markup)
             except Exception as e:
                 logger.error("telegram_plan_approval_failed", error=str(e))
                 await self.answer_callback_query(query_id, text=f"Error: {e}", show_alert=True)
@@ -350,12 +422,15 @@ class TelegramBotService:
             try:
                 plan_id = UUID(plan_id_str)
                 await svc.reject_plan(plan_id, user.id, reason="Rejected via Telegram")
-                await self.answer_callback_query(query_id, text="Action plan cancelled.")
-                await self.send_message(
-                    chat_id,
-                    "❌ <b>Action Plan Rejected.</b> No external actions were taken.",
-                    reply_markup=get_persistent_reply_keyboard(),
-                )
+                await self.answer_callback_query(query_id, text="Plan rejected.")
+                reject_text = "❌ <b>Action Plan Cancelled.</b>\n\nNo external changes were made."
+                dash_markup = get_unified_nav_keyboard("plans", [
+                    [{"text": "📊 Return to Dashboard", "callback_data": "nav:dashboard"}]
+                ])
+                if message_id:
+                    await self.edit_message_text(chat_id, message_id, reject_text, reply_markup=dash_markup)
+                else:
+                    await self.send_message(chat_id, reject_text, reply_markup=dash_markup)
             except Exception as e:
                 await self.answer_callback_query(query_id, text=f"Error: {e}", show_alert=True)
 
@@ -403,6 +478,9 @@ class TelegramBotService:
             elif view_name == "integrations":
                 await self.answer_callback_query(query_id)
                 content, markup = await render_integrations_view(user, db)
+            elif view_name == "help":
+                await self.answer_callback_query(query_id)
+                content, markup = render_help_view(user)
             else:
                 return
 
@@ -432,9 +510,9 @@ class TelegramBotService:
         await self.send_message(
             chat_id,
             f"✅ <b>Successfully connected!</b>\n\n"
-            f"Welcome, <b>{user.full_name}</b>. I am NEXA, your AI personal executive assistant.\n"
-            f"Use the buttons below to navigate or speak to me naturally anytime.",
-            reply_markup=get_persistent_reply_keyboard(),
+            f"Welcome, <b>{user.full_name}</b>. I am NEXA, your AI personal executive assistant.\n\n"
+            f"Speak to me naturally anytime or navigate using the interactive tabs below.",
+            reply_markup=get_remove_keyboard(),
         )
 
         # Send dashboard
@@ -490,7 +568,7 @@ class TelegramBotService:
                     ]
                 }
             else:
-                reply_markup = get_persistent_reply_keyboard()
+                reply_markup = get_remove_keyboard()
 
             await self.send_message(chat_id, reply.response_text, reply_markup=reply_markup)
         except Exception as exc:
@@ -498,5 +576,5 @@ class TelegramBotService:
             await self.send_message(
                 chat_id,
                 "Sorry, I encountered an error processing your request. Please try again in a moment.",
-                reply_markup=get_persistent_reply_keyboard(),
+                reply_markup=get_remove_keyboard(),
             )

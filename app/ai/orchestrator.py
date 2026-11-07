@@ -527,11 +527,17 @@ class NexaOrchestrator:
             entities["time_raw"] = time_match.group(0)
 
         # Duration match (e.g. 1 hour, 30 minutes)
-        dur_match = re.search(r"(\d+)\s*(hour|hr|minute|min)", lower)
+        # Ensure we don't accidentally capture the relative offset string
+        dur_match = re.search(r"(?:for|duration(?:\s+is)?)\s+(\d+)\s*(hour|hr|minute|min)", lower)
         if dur_match:
             entities["duration"] = f"{dur_match.group(1)} {dur_match.group(2)}"
         else:
-            entities["duration"] = entities.get("duration", "30 minutes")
+            text_without_rel = re.sub(r"(?:in|after)\s+\d+\s*(?:min(?:ute)?s?|hours?|hrs?|days?)", "", lower)
+            dur_match_fallback = re.search(r"(\d+)\s*(hour|hr|minute|min)", text_without_rel)
+            if dur_match_fallback:
+                entities["duration"] = f"{dur_match_fallback.group(1)} {dur_match_fallback.group(2)}"
+            else:
+                entities["duration"] = entities.get("duration", "30 minutes")
 
         return ExtractedIntent(intent=intent, confidence=0.9, entities=entities)
 
@@ -566,8 +572,14 @@ class NexaOrchestrator:
         return "Could you provide more details about this meeting?"
 
     def _normalize_meeting_times(self, data: dict[str, Any], timezone_str: str) -> None:
-        """Resolve relative times to ISO 8601 timestamps."""
+        """Resolve relative times to ISO 8601 timestamps with user timezone awareness."""
         now = datetime.now(UTC)
+        try:
+            from zoneinfo import ZoneInfo
+            user_tz = ZoneInfo(timezone_str or "Africa/Addis_Ababa")
+        except Exception:
+            user_tz = UTC
+        now_local = now.astimezone(user_tz)
 
         if data.get("relative_offset_val"):
             val = int(data["relative_offset_val"])
@@ -582,39 +594,50 @@ class NexaOrchestrator:
             day_name = data["weekday"]
             weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
             target_idx = weekdays.index(day_name)
-            current_weekday = now.weekday()
+            current_weekday = now_local.weekday()
             days_ahead = (target_idx - current_weekday) % 7
             if days_ahead == 0:
                 days_ahead = 7
-            start_dt = (now + timedelta(days=days_ahead)).replace(hour=10, minute=0, second=0, microsecond=0)
+            target_date = (now_local + timedelta(days=days_ahead)).date()
+            hour, minute = 10, 0
             if data.get("time_raw"):
                 try:
                     parsed_t = parse_datetime(data["time_raw"])
-                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                    hour, minute = parsed_t.hour, parsed_t.minute
                 except Exception:
                     pass
+            start_local = datetime(target_date.year, target_date.month, target_date.day, hour, minute, tzinfo=user_tz)
+            start_dt = start_local.astimezone(UTC)
         elif data.get("date_relative") == "tomorrow":
-            start_dt = (now + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+            target_date = (now_local + timedelta(days=1)).date()
+            hour, minute = 10, 0
             if data.get("time_raw"):
                 try:
                     parsed_t = parse_datetime(data["time_raw"])
-                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                    hour, minute = parsed_t.hour, parsed_t.minute
                 except Exception:
                     pass
+            start_local = datetime(target_date.year, target_date.month, target_date.day, hour, minute, tzinfo=user_tz)
+            start_dt = start_local.astimezone(UTC)
         elif data.get("date_relative") == "today":
-            start_dt = now
+            target_date = now_local.date()
+            hour, minute = now_local.hour + 1, 0
             if data.get("time_raw"):
                 try:
                     parsed_t = parse_datetime(data["time_raw"])
-                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                    hour, minute = parsed_t.hour, parsed_t.minute
                 except Exception:
                     pass
+            start_local = datetime(target_date.year, target_date.month, target_date.day, hour, minute, tzinfo=user_tz)
+            start_dt = start_local.astimezone(UTC)
         else:
             start_dt = now + timedelta(days=1, hours=2)  # default fallback
             if data.get("time_raw"):
                 try:
                     parsed_t = parse_datetime(data["time_raw"])
-                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                    target_date = (now_local + timedelta(days=1)).date()
+                    start_local = datetime(target_date.year, target_date.month, target_date.day, parsed_t.hour, parsed_t.minute, tzinfo=user_tz)
+                    start_dt = start_local.astimezone(UTC)
                 except Exception:
                     pass
 

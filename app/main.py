@@ -51,6 +51,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         env=settings.APP_ENV,
         timezone=settings.DEFAULT_TIMEZONE,
     )
+    if settings.telegram_configured:
+        try:
+            from app.integrations.telegram.bot import TelegramBotService
+
+            bot_svc = TelegramBotService()
+            await bot_svc.set_bot_commands()
+            logger.info("telegram_bot_commands_registered")
+        except Exception as e:
+            logger.warning("telegram_bot_commands_registration_failed", error=str(e))
     yield
     logger.info("nexa_shutdown")
     await engine.dispose()

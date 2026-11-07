@@ -23,17 +23,48 @@ from app.db.models import (
 )
 
 
+def get_remove_keyboard() -> dict[str, Any]:
+    """Dismiss and remove any persistent bottom sheet keyboard in Telegram."""
+    return {"remove_keyboard": True}
+
+
 def get_persistent_reply_keyboard() -> dict[str, Any]:
-    """Bottom persistent menu buttons for Telegram chat."""
-    return {
-        "keyboard": [
-            [{"text": "📊 Dashboard"}, {"text": "📅 Calendar"}],
-            [{"text": "📝 Tasks"}, {"text": "📋 Plans"}],
-            [{"text": "🔗 Integrations"}, {"text": "❓ Help"}],
-        ],
-        "resize_keyboard": True,
-        "is_persistent": True,
-    }
+    """Deprecated: Alias to get_remove_keyboard to ensure no persistent keyboard remains."""
+    return get_remove_keyboard()
+
+
+def get_unified_nav_keyboard(
+    active_tab: str = "dashboard",
+    action_rows: list[list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Generate a clean, professional inline keyboard with active tab indicators and actions."""
+    tabs = [
+        ("dashboard", "📊 Dashboard"),
+        ("calendar", "📅 Calendar"),
+        ("tasks", "📝 Tasks"),
+        ("plans", "📋 Plans"),
+        ("integrations", "🔗 Services"),
+        ("help", "❓ Guide"),
+    ]
+
+    tab_buttons: list[dict[str, Any]] = []
+    for tab_id, label in tabs:
+        if tab_id == active_tab:
+            tab_buttons.append({"text": f"• {label} •", "callback_data": f"nav:{tab_id}"})
+        else:
+            tab_buttons.append({"text": label, "callback_data": f"nav:{tab_id}"})
+
+    keyboard: list[list[dict[str, Any]]] = []
+
+    # 1. View-specific action rows (e.g. Join Meet, Complete Task, Approve Plan, Refresh)
+    if action_rows:
+        keyboard.extend(action_rows)
+
+    # 2. Main interactive navigation tabs
+    keyboard.append([tab_buttons[0], tab_buttons[1], tab_buttons[2]])  # Dashboard, Calendar, Tasks
+    keyboard.append([tab_buttons[3], tab_buttons[4], tab_buttons[5]])  # Plans, Services, Guide
+
+    return {"inline_keyboard": keyboard}
 
 
 def _format_dt(dt: datetime | None, user_tz: str | None = None) -> str:
@@ -158,24 +189,28 @@ async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict
     g_status = f"✅ Connected ({google_acc.email})" if google_acc else "❌ Disconnected"
     lines.append(f"🔗 <b>Google:</b> {g_status} | <b>Telegram:</b> ✅ Active")
 
-    # Build Interactive Buttons
-    inline_keyboard: list[list[dict[str, Any]]] = []
+    # Build Interactive Action Buttons
+    action_rows: list[list[dict[str, Any]]] = []
 
     # If there are pending plans, put approval buttons first
     for p in pending_plans:
-        inline_keyboard.append([
+        action_rows.append([
             {"text": f"✅ Approve: {p.title[:20]}", "callback_data": f"approve:{p.id}"},
             {"text": "❌ Reject", "callback_data": f"reject:{p.id}"},
         ])
 
-    # Navigation row
-    inline_keyboard.append([
-        {"text": "🔄 Refresh", "callback_data": "nav:dashboard"},
-        {"text": "📅 Full Schedule", "callback_data": "nav:calendar"},
-        {"text": "📝 Task Manager", "callback_data": "nav:tasks"},
-    ])
+    # If there are upcoming events with meet links, provide instant one-click join buttons
+    meet_buttons: list[dict[str, Any]] = []
+    for ev in events:
+        if ev.meet_link:
+            meet_buttons.append({"text": f"🔗 Join: {ev.title[:18]}", "url": ev.meet_link})
+    if meet_buttons:
+        for i in range(0, len(meet_buttons), 2):
+            action_rows.append(meet_buttons[i : i + 2])
 
-    return "\n".join(lines), {"inline_keyboard": inline_keyboard}
+    action_rows.append([{"text": "🔄 Refresh Dashboard", "callback_data": "nav:dashboard"}])
+
+    return "\n".join(lines), get_unified_nav_keyboard("dashboard", action_rows)
 
 
 async def render_calendar_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
@@ -215,14 +250,18 @@ async def render_calendar_view(user: User, db: AsyncSession) -> tuple[str, dict[
                 lines.append(f"   📍 {ev.location}")
             lines.append("")
 
-    inline_keyboard = [
-        [
-            {"text": "🔄 Refresh", "callback_data": "nav:calendar"},
-            {"text": "📊 Dashboard", "callback_data": "nav:dashboard"},
-        ]
-    ]
+    action_rows: list[list[dict[str, Any]]] = []
+    meet_buttons: list[dict[str, Any]] = []
+    for ev in events:
+        if ev.meet_link:
+            meet_buttons.append({"text": f"🔗 Join: {ev.title[:18]}", "url": ev.meet_link})
+    if meet_buttons:
+        for i in range(0, len(meet_buttons), 2):
+            action_rows.append(meet_buttons[i : i + 2])
 
-    return "\n".join(lines), {"inline_keyboard": inline_keyboard}
+    action_rows.append([{"text": "🔄 Refresh Schedule", "callback_data": "nav:calendar"}])
+
+    return "\n".join(lines), get_unified_nav_keyboard("calendar", action_rows)
 
 
 async def render_tasks_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
@@ -250,7 +289,7 @@ async def render_tasks_view(user: User, db: AsyncSession) -> tuple[str, dict[str
         TaskPriority.low: "☕ Low",
     }
 
-    inline_keyboard: list[list[dict[str, Any]]] = []
+    action_rows: list[list[dict[str, Any]]] = []
 
     if not tasks:
         lines.append("🎉 <i>Zero pending tasks. You are completely caught up!</i>")
@@ -263,17 +302,13 @@ async def render_tasks_view(user: User, db: AsyncSession) -> tuple[str, dict[str
                 lines.append(f"   <i>{t.description[:80]}</i>")
 
             # Inline button to complete this specific task
-            inline_keyboard.append([
+            action_rows.append([
                 {"text": f"✅ Complete: {t.title[:25]}", "callback_data": f"done_task:{t.id}"}
             ])
 
-    # Bottom control row
-    inline_keyboard.append([
-        {"text": "🔄 Refresh", "callback_data": "nav:tasks"},
-        {"text": "📊 Dashboard", "callback_data": "nav:dashboard"},
-    ])
+    action_rows.append([{"text": "🔄 Refresh Tasks", "callback_data": "nav:tasks"}])
 
-    return "\n".join(lines), {"inline_keyboard": inline_keyboard}
+    return "\n".join(lines), get_unified_nav_keyboard("tasks", action_rows)
 
 
 async def render_plans_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
@@ -299,7 +334,7 @@ async def render_plans_view(user: User, db: AsyncSession) -> tuple[str, dict[str
         ActionPlanStatus.failed: "⚠️ Execution Failed",
     }
 
-    inline_keyboard: list[list[dict[str, Any]]] = []
+    action_rows: list[list[dict[str, Any]]] = []
 
     if not plans:
         lines.append("<i>No action plans recorded yet. Ask NEXA to schedule something!</i>")
@@ -315,17 +350,14 @@ async def render_plans_view(user: User, db: AsyncSession) -> tuple[str, dict[str
 
             # If awaiting approval, offer instant inline buttons
             if p.status == ActionPlanStatus.pending_approval:
-                inline_keyboard.append([
+                action_rows.append([
                     {"text": f"✅ Approve: {p.title[:20]}", "callback_data": f"approve:{p.id}"},
                     {"text": "❌ Reject", "callback_data": f"reject:{p.id}"},
                 ])
 
-    inline_keyboard.append([
-        {"text": "🔄 Refresh", "callback_data": "nav:plans"},
-        {"text": "📊 Dashboard", "callback_data": "nav:dashboard"},
-    ])
+    action_rows.append([{"text": "🔄 Refresh Plans", "callback_data": "nav:plans"}])
 
-    return "\n".join(lines), {"inline_keyboard": inline_keyboard}
+    return "\n".join(lines), get_unified_nav_keyboard("plans", action_rows)
 
 
 async def render_integrations_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
@@ -342,7 +374,7 @@ async def render_integrations_view(user: User, db: AsyncSession) -> tuple[str, d
         "<b>1. Google Workspace (Calendar, Meet, Gmail, Tasks):</b>",
     ]
 
-    inline_keyboard: list[list[dict[str, Any]]] = []
+    action_rows: list[list[dict[str, Any]]] = []
 
     # Get service URL (Render URL)
     base_url = "https://nexa-1jwm.onrender.com"
@@ -354,7 +386,7 @@ async def render_integrations_view(user: User, db: AsyncSession) -> tuple[str, d
     else:
         lines.append("   • Status: ❌ <b>Not Connected</b>")
         lines.append("   • <i>Connect to allow NEXA to create Calendar events and send Gmail invites.</i>")
-        inline_keyboard.append([
+        action_rows.append([
             {"text": "🔗 Connect Google Workspace", "url": connect_url}
         ])
 
@@ -365,12 +397,9 @@ async def render_integrations_view(user: User, db: AsyncSession) -> tuple[str, d
     n8n_status = "✅ Configured" if settings.n8n_configured else "⚙️ Optional Webhook"
     lines.append(f"   • Status: <i>{n8n_status}</i>")
 
-    inline_keyboard.append([
-        {"text": "🔄 Refresh", "callback_data": "nav:integrations"},
-        {"text": "📊 Dashboard", "callback_data": "nav:dashboard"},
-    ])
+    action_rows.append([{"text": "🔄 Refresh Services", "callback_data": "nav:integrations"}])
 
-    return "\n".join(lines), {"inline_keyboard": inline_keyboard}
+    return "\n".join(lines), get_unified_nav_keyboard("integrations", action_rows)
 
 
 def render_help_view(user: User) -> tuple[str, dict[str, Any] | None]:
@@ -384,14 +413,14 @@ def render_help_view(user: User) -> tuple[str, dict[str, Any] | None]:
         "• <i>'Add task: Finalize audit report due Thursday, urgent priority'</i>",
         "• <i>'What are my highest priority tasks right now?'</i>",
         "• <i>'Cancel my 3 PM meeting today'</i>\n",
-        "⚡ <b>Menu Buttons:</b>",
+        "⚡ <b>Menu Tabs:</b>",
         "• <b>📊 Dashboard:</b> Executive summary of today's schedule & tasks",
         "• <b>📅 Calendar:</b> Next 7 days of meetings & Meet links",
         "• <b>📝 Tasks:</b> Task manager with one-click completion buttons",
         "• <b>📋 Plans:</b> Action plans awaiting your review & approval",
-        "• <b>🔗 Integrations:</b> Google Workspace & service status",
+        "• <b>🔗 Services:</b> Google Workspace & service status",
     ]
-    inline_keyboard = [
-        [{"text": "📊 Open Dashboard", "callback_data": "nav:dashboard"}]
+    action_rows = [
+        [{"text": "📊 Open Executive Dashboard", "callback_data": "nav:dashboard"}]
     ]
-    return "\n".join(lines), {"inline_keyboard": inline_keyboard}
+    return "\n".join(lines), get_unified_nav_keyboard("help", action_rows)

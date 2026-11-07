@@ -76,3 +76,21 @@ async def test_task_and_reminder_creation_workflow(auth_client: AsyncClient):
     assert "Check my email" in data["message"]["content"]
     assert "Schedule Telegram notification" in data["message"]["content"]
     assert "action plan" in data["message"]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_relative_offset_meeting_workflow(auth_client: AsyncClient):
+    """Verify that NEXA accepts 'in 20 minutes' for scheduling meetings directly."""
+    create_res = await auth_client.post("/api/v1/conversations", json={"title": "Quick Meeting"})
+    conv_id = create_res.json()["id"]
+
+    msg_res = await auth_client.post(
+        f"/api/v1/conversations/{conv_id}/messages",
+        json={"content": "in 20 minutes schedule a meeting with client John (john@example.com) about the fintech project"},
+    )
+    assert msg_res.status_code == 201
+    data = msg_res.json()
+    assert data["action_plan_id"] is not None
+    assert "Meeting with" in data["message"]["content"]
+    assert "fintech project" in data["message"]["content"]
+    assert "Check calendar availability" in data["message"]["content"]

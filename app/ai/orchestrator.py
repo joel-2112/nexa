@@ -340,6 +340,15 @@ class NexaOrchestrator:
         if topic_match:
             entities["topic"] = topic_match.group(1).strip()
 
+        # Relative offset detection (e.g. "in 20 minutes", "after 1 hour")
+        rel_match = re.search(
+            r"(?:in|after)\s+(\d+)\s*(min(?:ute)?s?|hours?|hrs?|days?)",
+            lower,
+        )
+        if rel_match:
+            entities["relative_offset_val"] = int(rel_match.group(1))
+            entities["relative_offset_unit"] = rel_match.group(2)
+
         # Relative date/time keywords
         if "tomorrow" in lower:
             entities["date_relative"] = "tomorrow"
@@ -347,7 +356,7 @@ class NexaOrchestrator:
             entities["date_relative"] = "today"
 
         # Time match (e.g. 12:00 AM, 3:30 PM, 2pm, 14:00)
-        time_match = re.search(r"(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)", text)
+        time_match = re.search(r"(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM))", text)
         if time_match:
             entities["time_raw"] = time_match.group(0)
 
@@ -355,6 +364,8 @@ class NexaOrchestrator:
         dur_match = re.search(r"(\d+)\s*(hour|hr|minute|min)", lower)
         if dur_match:
             entities["duration"] = f"{dur_match.group(1)} {dur_match.group(2)}"
+        else:
+            entities["duration"] = entities.get("duration", "30 minutes")
 
         return ExtractedIntent(intent=intent, confidence=0.9, entities=entities)
 
@@ -364,10 +375,15 @@ class NexaOrchestrator:
             missing.append("client_name")
         if not data.get("client_email"):
             missing.append("client_email")
-        if not data.get("start_time") and not (data.get("date_relative") and data.get("time_raw")):
+        has_time = bool(
+            data.get("start_time")
+            or (data.get("date_relative") and data.get("time_raw"))
+            or data.get("relative_offset_val")
+        )
+        if not has_time:
             missing.append("meeting_time")
         if not data.get("duration"):
-            missing.append("duration")
+            data["duration"] = "30 minutes"
         return missing
 
     def _build_meeting_follow_up_question(self, missing: list[str], data: dict[str, Any]) -> str:
@@ -385,30 +401,56 @@ class NexaOrchestrator:
     def _normalize_meeting_times(self, data: dict[str, Any], timezone_str: str) -> None:
         """Resolve relative times to ISO 8601 timestamps."""
         now = datetime.now(UTC)
-        start_dt = now + timedelta(days=1, hours=2)  # default fallback
 
-        if data.get("date_relative") == "tomorrow":
+        if data.get("relative_offset_val"):
+            val = int(data["relative_offset_val"])
+            unit = str(data.get("relative_offset_unit", "min")).lower()
+            if "hour" in unit or "hr" in unit:
+                start_dt = now + timedelta(hours=val)
+            elif "day" in unit:
+                start_dt = now + timedelta(days=val)
+            else:
+                start_dt = now + timedelta(minutes=val)
+        elif data.get("date_relative") == "tomorrow":
             start_dt = (now + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
-
-        # Parse time if raw string exists
-        if data.get("time_raw"):
-            try:
-                # E.g. 12:00 PM or 2:00 PM
-                t_str = data["time_raw"]
-                parsed_t = parse_datetime(t_str)
-                start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
-            except Exception:
-                pass
+            if data.get("time_raw"):
+                try:
+                    parsed_t = parse_datetime(data["time_raw"])
+                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                except Exception:
+                    pass
+        elif data.get("date_relative") == "today":
+            start_dt = now
+            if data.get("time_raw"):
+                try:
+                    parsed_t = parse_datetime(data["time_raw"])
+                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                except Exception:
+                    pass
+        else:
+            start_dt = now + timedelta(days=1, hours=2)  # default fallback
+            if data.get("time_raw"):
+                try:
+                    parsed_t = parse_datetime(data["time_raw"])
+                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                except Exception:
+                    pass
 
         # Parse duration
-        duration_minutes = 60
-        dur_str = str(data.get("duration", "1 hour")).lower()
+        duration_minutes = 30
+        dur_str = str(data.get("duration", "30 minutes")).lower()
         if "30" in dur_str or "half" in dur_str:
             duration_minutes = 30
-        elif "hour" in dur_str:
+        elif "hour" in dur_str or "hr" in dur_str:
             match = re.search(r"(\d+)", dur_str)
             if match:
                 duration_minutes = int(match.group(1)) * 60
+            else:
+                duration_minutes = 60
+        elif "minute" in dur_str or "min" in dur_str:
+            match = re.search(r"(\d+)", dur_str)
+            if match:
+                duration_minutes = int(match.group(1))
 
         end_dt = start_dt + timedelta(minutes=duration_minutes)
 

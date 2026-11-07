@@ -116,7 +116,13 @@ class NexaOrchestrator:
                     return "Not set"
                 try:
                     dt = parse_datetime(val)
-                    return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip()
+                    tz_str = user.timezone or "Africa/Addis_Ababa"
+                    try:
+                        from zoneinfo import ZoneInfo
+                        dt = dt.astimezone(ZoneInfo(tz_str))
+                    except Exception:
+                        pass
+                    return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip().replace(" 0", " ")
                 except Exception:
                     return str(val)
 
@@ -170,7 +176,13 @@ class NexaOrchestrator:
                     return "No due date"
                 try:
                     dt = parse_datetime(val)
-                    return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip()
+                    tz_str = user.timezone or "Africa/Addis_Ababa"
+                    try:
+                        from zoneinfo import ZoneInfo
+                        dt = dt.astimezone(ZoneInfo(tz_str))
+                    except Exception:
+                        pass
+                    return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip().replace(" 0", " ")
                 except Exception:
                     return str(val)
 
@@ -293,17 +305,16 @@ class NexaOrchestrator:
         except AIError as ai_err:
             logger.warning("orchestrator_ai_fallback", error=str(ai_err))
             err_str = str(ai_err).lower()
-            if "credit" in err_str or "429" in err_str or "quota" in err_str:
+            if "credit" in err_str or "quota" in err_str or "429" in err_str:
                 reply_text = (
-                    "⚠️ <b>OpenAI API Quota Exceeded (429)</b>\n\n"
-                    "Your OpenAI account has no remaining credits. "
-                    "Please add credits at https://platform.openai.com/settings/organization/billing.\n\n"
-                    "<i>Note: NEXA's core actions (scheduling meetings, managing tasks, checking calendar, and bot buttons) continue to work directly!</i>"
+                    "⚠️ <b>Gemini API Quota Limit</b>\n\n"
+                    "Your Gemini API rate limit or quota has been reached. Please check your Google AI Studio dashboard.\n\n"
+                    "<i>Note: Core features (scheduling meetings, task management, calendar views, and reminders) continue to operate!</i>"
                 )
             else:
                 reply_text = (
                     f"I understand your instruction: '{user_message}'. "
-                    "To enable live AI completions, please configure OPENAI_API_KEY."
+                    "NEXA encountered a temporary issue contacting the Gemini model. Please try again."
                 )
 
         assistant_msg = Message(

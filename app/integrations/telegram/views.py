@@ -36,12 +36,18 @@ def get_persistent_reply_keyboard() -> dict[str, Any]:
     }
 
 
-def _format_dt(dt: datetime | None, user_tz: str = "UTC") -> str:
+def _format_dt(dt: datetime | None, user_tz: str | None = None) -> str:
     if not dt:
         return "Not set"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return dt.strftime("%b %d, %Y at %I:%M %p")
+    tz_str = user_tz or "Africa/Addis_Ababa"
+    try:
+        from zoneinfo import ZoneInfo
+        dt = dt.astimezone(ZoneInfo(tz_str))
+    except Exception:
+        pass
+    return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip().replace(" 0", " ")
 
 
 async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
@@ -100,12 +106,18 @@ async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict
     )
     google_acc = (await db.execute(google_stmt)).scalar_one_or_none()
 
-    # Build Dashboard Text
+    # Build Dashboard Text in User's Local Timezone
     tz_name = user.timezone or "Africa/Addis_Ababa"
+    try:
+        from zoneinfo import ZoneInfo
+        now_local = now.astimezone(ZoneInfo(tz_name))
+    except Exception:
+        now_local = now
+
     lines = [
         "📊 <b>NEXA Executive Dashboard</b>",
         f"👤 <b>User:</b> {user.full_name} | 🌍 <code>{tz_name}</code>",
-        f"⏰ <i>{now.strftime('%A, %b %d • %I:%M %p UTC')}</i>",
+        f"⏰ <i>{now_local.strftime('%A, %b %d • %I:%M %p %Z').replace(' 0', ' ')}</i>",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
@@ -130,7 +142,7 @@ async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict
     if tasks:
         for t in tasks:
             icon = priority_icons.get(t.priority, "📌")
-            due_str = f" <i>(Due: {_format_dt(t.due_at)})</i>" if t.due_at else ""
+            due_str = f" <i>(Due: {_format_dt(t.due_at, tz_name)})</i>" if t.due_at else ""
             lines.append(f"{icon} <b>{t.title}</b>{due_str}")
     else:
         lines.append("• <i>All tasks complete! Outstanding work.</i>")
@@ -245,7 +257,7 @@ async def render_tasks_view(user: User, db: AsyncSession) -> tuple[str, dict[str
     else:
         for idx, t in enumerate(tasks, 1):
             prio = priority_icons.get(t.priority, "📌 Medium")
-            due_str = f" • Due: {_format_dt(t.due_at)}" if t.due_at else ""
+            due_str = f" • Due: {_format_dt(t.due_at, user.timezone or 'Africa/Addis_Ababa')}" if t.due_at else ""
             lines.append(f"<b>{idx}. {t.title}</b> [{prio}]{due_str}")
             if t.description:
                 lines.append(f"   <i>{t.description[:80]}</i>")
@@ -294,7 +306,7 @@ async def render_plans_view(user: User, db: AsyncSession) -> tuple[str, dict[str
     else:
         for idx, p in enumerate(plans, 1):
             badge = status_badges.get(p.status, p.status.value)
-            date_str = _format_dt(p.created_at)
+            date_str = _format_dt(p.created_at, user.timezone or "Africa/Addis_Ababa")
             lines.append(f"<b>{idx}. {p.title}</b>")
             lines.append(f"   Status: <b>{badge}</b> • {date_str}")
             if p.rejection_reason:

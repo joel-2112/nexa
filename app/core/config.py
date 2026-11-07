@@ -103,8 +103,11 @@ class Settings(BaseSettings):
             self.CELERY_RESULT_BACKEND = self.REDIS_URL.replace(f"/{self.REDIS_DB}", "/1")
         return self
 
-    # AI / LLM Provider (OpenAI or Google Gemini)
-    LLM_PROVIDER: str = "openai"  # "openai" or "gemini"
+    # AI / LLM Provider (Google Gemini is the default)
+    LLM_PROVIDER: str = "gemini"  # "gemini" or "openai"
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str | None = None
     OPENAI_MODEL: str = "gpt-4o"
@@ -112,16 +115,11 @@ class Settings(BaseSettings):
     OPENAI_MAX_TOKENS: int = 4096
     OPENAI_TIMEOUT: int = 60
 
-    GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-flash"
-
     @property
     def is_gemini_active(self) -> bool:
-        return bool(
-            self.GEMINI_API_KEY
-            or self.LLM_PROVIDER.lower() == "gemini"
-            or (self.OPENAI_API_KEY and self.OPENAI_API_KEY.startswith("AIza"))
-        )
+        if self.LLM_PROVIDER.lower() == "openai" and self.OPENAI_API_KEY and not self.GEMINI_API_KEY:
+            return False
+        return True
 
     # Google OAuth
     GOOGLE_CLIENT_ID: str = ""

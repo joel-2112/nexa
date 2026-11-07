@@ -81,24 +81,66 @@ def _format_dt(dt: datetime | None, user_tz: str | None = None) -> str:
     return dt.strftime("%b %d, %Y at %I:%M %p %Z").strip().replace(" 0", " ")
 
 
+def categorize_task(t: Task, now: datetime) -> str:
+    """Classify task into professional lifecycle categories:
+    - 'completed': Explicitly marked done
+    - 'scheduled': due_at is in the future
+    - 'active': due_at has arrived and is within active window (or no due date set)
+    - 'expired': due_at was in the past and > 2 hours overdue without completion
+    """
+    if t.status == TaskStatus.completed:
+        return "completed"
+    if t.status == TaskStatus.cancelled:
+        return "cancelled"
+
+    if not t.due_at:
+        return "active"
+
+    due = t.due_at if t.due_at.tzinfo else t.due_at.replace(tzinfo=UTC)
+    now_utc = now if now.tzinfo else now.replace(tzinfo=UTC)
+
+    if due > now_utc:
+        return "scheduled"
+    elif now_utc - due <= timedelta(hours=2):
+        return "active"
+    else:
+        return "expired"
+
+
 async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
     """Render the primary executive dashboard for Telegram."""
     now = datetime.now(UTC)
 
-    # 1. Fetch upcoming events (next 48 hours)
+    # 1. Auto-complete past calendar events whose end_at has passed
+    past_event_stmt = (
+        select(CalendarEvent)
+        .where(
+            CalendarEvent.owner_id == user.id,
+            CalendarEvent.status == CalendarEventStatus.scheduled,
+            CalendarEvent.end_at < now,
+        )
+    )
+    past_events = (await db.execute(past_event_stmt)).scalars().all()
+    for pe in past_events:
+        pe.status = CalendarEventStatus.completed
+    if past_events:
+        await db.flush()
+
+    # 2. Fetch upcoming or ongoing events (where end_at >= now)
     event_stmt = (
         select(CalendarEvent)
         .where(
             CalendarEvent.owner_id == user.id,
             CalendarEvent.status == CalendarEventStatus.scheduled,
-            CalendarEvent.start_at >= now - timedelta(hours=1),
+            CalendarEvent.end_at >= now,
+            CalendarEvent.start_at <= now + timedelta(days=2),
         )
         .order_by(CalendarEvent.start_at.asc())
         .limit(3)
     )
     events = (await db.execute(event_stmt)).scalars().all()
 
-    # 2. Fetch pending tasks
+    # 3. Fetch all pending and in-progress tasks
     task_stmt = (
         select(Task)
         .where(
@@ -106,18 +148,31 @@ async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict
             Task.status.in_([TaskStatus.pending, TaskStatus.in_progress]),
         )
         .order_by(Task.due_at.asc().nullslast(), Task.created_at.desc())
-        .limit(4)
     )
-    tasks = (await db.execute(task_stmt)).scalars().all()
+    all_uncompleted_tasks = (await db.execute(task_stmt)).scalars().all()
 
-    # Task total count
-    count_stmt = select(func.count(Task.id)).where(
+    active_tasks: list[Task] = []
+    scheduled_tasks: list[Task] = []
+    expired_tasks: list[Task] = []
+
+    for t in all_uncompleted_tasks:
+        cat = categorize_task(t, now)
+        if cat == "scheduled":
+            scheduled_tasks.append(t)
+        elif cat == "expired":
+            expired_tasks.append(t)
+        else:
+            active_tasks.append(t)
+
+    # 4. Count tasks completed today
+    completed_today_stmt = select(func.count(Task.id)).where(
         Task.owner_id == user.id,
-        Task.status.in_([TaskStatus.pending, TaskStatus.in_progress]),
+        Task.status == TaskStatus.completed,
+        Task.completed_at >= now - timedelta(days=1),
     )
-    total_tasks = (await db.execute(count_stmt)).scalar() or 0
+    completed_today_count = (await db.execute(completed_today_stmt)).scalar() or 0
 
-    # 3. Fetch pending action plans
+    # 5. Fetch pending action plans
     plan_stmt = (
         select(ActionPlan)
         .where(
@@ -129,7 +184,7 @@ async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict
     )
     pending_plans = (await db.execute(plan_stmt)).scalars().all()
 
-    # 4. Check connected Google account
+    # 6. Check connected Google account
     google_stmt = select(ConnectedAccount).where(
         ConnectedAccount.user_id == user.id,
         ConnectedAccount.provider == IntegrationProvider.google,
@@ -158,25 +213,33 @@ async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict
         for ev in events:
             time_str = _format_dt(ev.start_at, tz_name)
             meet_badge = f" [🔗 <a href='{ev.meet_link}'>Join Meet</a>]" if ev.meet_link else ""
-            lines.append(f"• <b>{ev.title}</b>{meet_badge}\n  🕒 {time_str}")
+            if ev.start_at <= now <= ev.end_at:
+                lines.append(f"• 🔴 <b>[Happening Now] {ev.title}</b>{meet_badge}\n  🕒 Ends: {_format_dt(ev.end_at, tz_name)}")
+            else:
+                lines.append(f"• <b>{ev.title}</b>{meet_badge}\n  🕒 {time_str}")
     else:
         lines.append("• <i>No meetings scheduled in the next 48h. Clear skies!</i>")
 
     # Tasks Section
-    lines.append(f"\n📝 <b>Active Tasks ({total_tasks}):</b>")
-    priority_icons = {
-        TaskPriority.urgent: "🚨",
-        TaskPriority.high: "⚠️",
-        TaskPriority.medium: "📌",
-        TaskPriority.low: "☕",
-    }
-    if tasks:
-        for t in tasks:
-            icon = priority_icons.get(t.priority, "📌")
-            due_str = f" <i>(Due: {_format_dt(t.due_at, tz_name)})</i>" if t.due_at else ""
-            lines.append(f"{icon} <b>{t.title}</b>{due_str}")
-    else:
+    total_uncompleted = len(active_tasks) + len(scheduled_tasks) + len(expired_tasks)
+    stats_str = f"{total_uncompleted} pending"
+    if completed_today_count > 0:
+        stats_str += f", {completed_today_count} completed today"
+    lines.append(f"\n📝 <b>Tasks Overview ({stats_str}):</b>")
+
+    if not total_uncompleted:
         lines.append("• <i>All tasks complete! Outstanding work.</i>")
+    else:
+        if active_tasks:
+            for t in active_tasks[:3]:
+                due_info = f" • <i>Due: {_format_dt(t.due_at, tz_name)}</i>" if t.due_at else ""
+                lines.append(f"• ⚡ [Active] <b>{t.title}</b>{due_info}")
+        if scheduled_tasks:
+            for t in scheduled_tasks[:2]:
+                lines.append(f"• ⏳ [Scheduled] <b>{t.title}</b> <i>(At {_format_dt(t.due_at, tz_name)})</i>")
+        if expired_tasks:
+            for t in expired_tasks[:2]:
+                lines.append(f"• ⚠️ [Expired] <b>{t.title}</b> <i>(Was due {_format_dt(t.due_at, tz_name)})</i>")
 
     # Pending Plans Section
     if pending_plans:
@@ -214,16 +277,32 @@ async def render_dashboard_view(user: User, db: AsyncSession) -> tuple[str, dict
 
 
 async def render_calendar_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
-    """Render the 7-day calendar schedule."""
+    """Render the 7-day calendar schedule, auto-completing concluded events."""
     now = datetime.now(UTC)
     end_window = now + timedelta(days=7)
 
+    # 1. Automatically mark past events whose end_at has passed as completed
+    past_stmt = (
+        select(CalendarEvent)
+        .where(
+            CalendarEvent.owner_id == user.id,
+            CalendarEvent.status == CalendarEventStatus.scheduled,
+            CalendarEvent.end_at < now,
+        )
+    )
+    past_events = (await db.execute(past_stmt)).scalars().all()
+    for pe in past_events:
+        pe.status = CalendarEventStatus.completed
+    if past_events:
+        await db.flush()
+
+    # 2. Query only scheduled events that have not ended yet
     stmt = (
         select(CalendarEvent)
         .where(
             CalendarEvent.owner_id == user.id,
             CalendarEvent.status == CalendarEventStatus.scheduled,
-            CalendarEvent.start_at >= now - timedelta(hours=2),
+            CalendarEvent.end_at >= now,
             CalendarEvent.start_at <= end_window,
         )
         .order_by(CalendarEvent.start_at.asc())
@@ -233,7 +312,7 @@ async def render_calendar_view(user: User, db: AsyncSession) -> tuple[str, dict[
     tz_name = user.timezone or "Africa/Addis_Ababa"
     lines = [
         "📅 <b>Your 7-Day Calendar & Schedule</b>",
-        f"<i>Showing events between {now.strftime('%b %d')} and {end_window.strftime('%b %d')}</i>\n",
+        f"<i>Showing upcoming events between {now.strftime('%b %d')} and {end_window.strftime('%b %d')}</i>\n",
     ]
 
     if not events:
@@ -242,7 +321,10 @@ async def render_calendar_view(user: User, db: AsyncSession) -> tuple[str, dict[
         for idx, ev in enumerate(events, 1):
             start_str = _format_dt(ev.start_at, tz_name)
             end_str = ev.end_at.strftime("%I:%M %p") if ev.end_at else ""
-            lines.append(f"<b>{idx}. {ev.title}</b>")
+            if ev.start_at <= now <= ev.end_at:
+                lines.append(f"<b>{idx}. 🔴 [Happening Now] {ev.title}</b>")
+            else:
+                lines.append(f"<b>{idx}. {ev.title}</b>")
             lines.append(f"   🕒 {start_str} – {end_str}")
             if ev.meet_link:
                 lines.append(f"   🔗 <a href='{ev.meet_link}'>Join Google Meet</a>")
@@ -265,21 +347,52 @@ async def render_calendar_view(user: User, db: AsyncSession) -> tuple[str, dict[
 
 
 async def render_tasks_view(user: User, db: AsyncSession) -> tuple[str, dict[str, Any] | None]:
-    """Render interactive task manager with completion buttons."""
-    stmt = (
+    """Render interactive task manager with professional lifecycle categorization:
+    Active, Scheduled, Expired, and Completed.
+    """
+    now = datetime.now(UTC)
+    tz_name = user.timezone or "Africa/Addis_Ababa"
+
+    # 1. Fetch all pending / in-progress tasks
+    pending_stmt = (
         select(Task)
         .where(
             Task.owner_id == user.id,
             Task.status.in_([TaskStatus.pending, TaskStatus.in_progress]),
         )
         .order_by(Task.due_at.asc().nullslast(), Task.created_at.desc())
-        .limit(10)
     )
-    tasks = (await db.execute(stmt)).scalars().all()
+    pending_tasks = (await db.execute(pending_stmt)).scalars().all()
+
+    # 2. Fetch recently completed tasks
+    completed_stmt = (
+        select(Task)
+        .where(
+            Task.owner_id == user.id,
+            Task.status == TaskStatus.completed,
+        )
+        .order_by(Task.completed_at.desc().nullslast(), Task.updated_at.desc())
+        .limit(5)
+    )
+    completed_tasks = (await db.execute(completed_stmt)).scalars().all()
+
+    active_tasks: list[Task] = []
+    scheduled_tasks: list[Task] = []
+    expired_tasks: list[Task] = []
+
+    for t in pending_tasks:
+        cat = categorize_task(t, now)
+        if cat == "scheduled":
+            scheduled_tasks.append(t)
+        elif cat == "expired":
+            expired_tasks.append(t)
+        else:
+            active_tasks.append(t)
 
     lines = [
         "📝 <b>NEXA Task Manager</b>",
-        "<i>Click any button below to mark a task as completed:</i>\n",
+        f"👤 <code>{user.full_name}</code> | 🌍 <code>{tz_name}</code>",
+        "━━━━━━━━━━━━━━━━━━━━",
     ]
 
     priority_icons = {
@@ -291,20 +404,51 @@ async def render_tasks_view(user: User, db: AsyncSession) -> tuple[str, dict[str
 
     action_rows: list[list[dict[str, Any]]] = []
 
-    if not tasks:
-        lines.append("🎉 <i>Zero pending tasks. You are completely caught up!</i>")
-    else:
-        for idx, t in enumerate(tasks, 1):
+    # 1. Active Tasks Section
+    lines.append(f"\n⚡ <b>Active Tasks ({len(active_tasks)}):</b>")
+    if active_tasks:
+        for idx, t in enumerate(active_tasks, 1):
             prio = priority_icons.get(t.priority, "📌 Medium")
-            due_str = f" • Due: {_format_dt(t.due_at, user.timezone or 'Africa/Addis_Ababa')}" if t.due_at else ""
+            due_str = f" • 🕒 Due: {_format_dt(t.due_at, tz_name)}" if t.due_at else ""
             lines.append(f"<b>{idx}. {t.title}</b> [{prio}]{due_str}")
             if t.description:
                 lines.append(f"   <i>{t.description[:80]}</i>")
-
-            # Inline button to complete this specific task
             action_rows.append([
-                {"text": f"✅ Complete: {t.title[:25]}", "callback_data": f"done_task:{t.id}"}
+                {"text": f"✅ Complete: {t.title[:24]}", "callback_data": f"done_task:{t.id}"}
             ])
+    else:
+        lines.append("• <i>No active tasks right now.</i>")
+
+    # 2. Scheduled Tasks Section
+    lines.append(f"\n⏳ <b>Scheduled Tasks ({len(scheduled_tasks)}):</b>")
+    if scheduled_tasks:
+        for idx, t in enumerate(scheduled_tasks, 1):
+            prio = priority_icons.get(t.priority, "📌 Medium")
+            lines.append(f"<b>{idx}. {t.title}</b> [{prio}]\n   🕒 <i>Scheduled for: {_format_dt(t.due_at, tz_name)}</i>")
+            action_rows.append([
+                {"text": f"✅ Complete Early: {t.title[:20]}", "callback_data": f"done_task:{t.id}"}
+            ])
+    else:
+        lines.append("• <i>No scheduled tasks queued.</i>")
+
+    # 3. Expired / Overdue Tasks Section
+    if expired_tasks:
+        lines.append(f"\n⚠️ <b>Expired / Overdue Tasks ({len(expired_tasks)}):</b>")
+        for idx, t in enumerate(expired_tasks, 1):
+            prio = priority_icons.get(t.priority, "📌 Medium")
+            lines.append(f"<b>{idx}. {t.title}</b> [{prio}]\n   ⚠️ <i>Was due: {_format_dt(t.due_at, tz_name)}</i>")
+            action_rows.append([
+                {"text": f"✅ Done (Expired): {t.title[:20]}", "callback_data": f"done_task:{t.id}"}
+            ])
+
+    # 4. Completed Tasks Section
+    lines.append(f"\n✅ <b>Recently Completed ({len(completed_tasks)}):</b>")
+    if completed_tasks:
+        for _idx, t in enumerate(completed_tasks, 1):
+            done_time = _format_dt(t.completed_at, tz_name) if t.completed_at else "Recently"
+            lines.append(f"• <s>{t.title}</s> <i>({done_time})</i>")
+    else:
+        lines.append("• <i>No completed tasks yet.</i>")
 
     action_rows.append([{"text": "🔄 Refresh Tasks", "callback_data": "nav:tasks"}])
 

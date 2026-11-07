@@ -361,6 +361,45 @@ class TelegramBotService:
                     reply_markup=dash_markup,
                 )
                 return
+        elif any(
+            phrase in clean_text
+            for phrase in [
+                "mark task done", "complete task", "task done", "task completed",
+                "mark task as done", "i finished the task", "task finished",
+                "mark done", "mark as completed", "completed task", "i did the task",
+            ]
+        ):
+            now = datetime.now(UTC)
+            task_stmt = (
+                select(Task)
+                .where(
+                    Task.owner_id == user.id,
+                    Task.status.in_([TaskStatus.pending, TaskStatus.in_progress]),
+                )
+                .order_by(Task.due_at.asc().nullslast(), Task.created_at.desc())
+                .limit(1)
+            )
+            target_task = (await db.execute(task_stmt)).scalar_one_or_none()
+            if target_task:
+                target_task.status = TaskStatus.completed
+                target_task.completed_at = now
+                await db.flush()
+                content, markup = await render_tasks_view(user, db)
+                await self.send_message(
+                    chat_id,
+                    f"🎉 <b>Task Marked Completed!</b>\n\n"
+                    f"✓ <s>{target_task.title}</s> has been moved to Completed Tasks.\n"
+                    f"It will no longer appear on your active schedule.",
+                    reply_markup=markup,
+                )
+                return
+            else:
+                await self.send_message(
+                    chat_id,
+                    "🎉 <b>All caught up!</b> You have no pending tasks to complete.",
+                    reply_markup=get_remove_keyboard(),
+                )
+                return
 
         # Route message into the AI conversation engine
         await self._process_user_message(user, text, chat_id, db)

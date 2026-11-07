@@ -214,6 +214,42 @@ class NexaOrchestrator:
                 clarification_needed=False,
             )
 
+        # Check if this is a direct calendar availability / conflict check
+        if extracted.entities.get("is_conflict_check"):
+            start_iso = extracted.entities.get("check_start_iso")
+            end_iso = extracted.entities.get("check_end_iso")
+            display_range = extracted.entities.get("check_display_range", "that time window")
+            if start_iso and end_iso:
+                avail_res = await self.executor.execute(
+                    tool_name="check_calendar_availability",
+                    arguments={"start_time": start_iso, "end_time": end_iso},
+                    user=user,
+                    bypass_approval_check=True,
+                )
+                if avail_res.get("available"):
+                    reply_text = (
+                        f"📅 <b>Calendar Availability:</b>\n\n"
+                        f"You are completely <b>free</b> with no conflicts for <b>{display_range}</b>.\n"
+                        f"Your schedule is clear!"
+                    )
+                else:
+                    reply_text = (
+                        f"⚠️ <b>Scheduling Conflict:</b>\n\n"
+                        f"You have a conflicting event scheduled during <b>{display_range}</b>."
+                    )
+                assistant_msg = Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.assistant,
+                    content=reply_text,
+                )
+                self.db.add(assistant_msg)
+                conversation.message_count += 1
+                await self.db.flush()
+                return OrchestratorResponse(
+                    response_text=reply_text,
+                    executed_tools=[{"tool": "check_calendar_availability", "result": avail_res}],
+                )
+
         # 4. Standard completion for general queries or direct assistance
         messages = await self.context_mgr.build_context_messages(
             conversation=conversation,
@@ -222,6 +258,8 @@ class NexaOrchestrator:
         )
 
         tools = tool_registry.get_openai_tools()
+        executed_tools: list[dict[str, Any]] = []
+        reply_text = ""
 
         try:
             ai_response = await self.agent.chat_completion(
@@ -232,7 +270,6 @@ class NexaOrchestrator:
             reply_text = choice.message.content or ""
 
             # Check if LLM requested read-only tool calls
-            executed_tools = []
             if choice.message.tool_calls:
                 for tc in choice.message.tool_calls:
                     fn_name = tc.function.name
@@ -253,12 +290,21 @@ class NexaOrchestrator:
             if not reply_text:
                 reply_text = "I have processed your request. How else may I assist you?"
 
-        except AIError:
-            # Fallback when OpenAI key is absent or in demo mode
-            reply_text = (
-                f"I understand your instruction: '{user_message}'. "
-                "To enable live AI completions, please configure OPENAI_API_KEY."
-            )
+        except AIError as ai_err:
+            logger.warning("orchestrator_ai_fallback", error=str(ai_err))
+            err_str = str(ai_err).lower()
+            if "credit" in err_str or "429" in err_str or "quota" in err_str:
+                reply_text = (
+                    "⚠️ <b>OpenAI API Quota Exceeded (429)</b>\n\n"
+                    "Your OpenAI account has no remaining credits. "
+                    "Please add credits at https://platform.openai.com/settings/organization/billing.\n\n"
+                    "<i>Note: NEXA's core actions (scheduling meetings, managing tasks, checking calendar, and bot buttons) continue to work directly!</i>"
+                )
+            else:
+                reply_text = (
+                    f"I understand your instruction: '{user_message}'. "
+                    "To enable live AI completions, please configure OPENAI_API_KEY."
+                )
 
         assistant_msg = Message(
             conversation_id=conversation.id,
@@ -311,6 +357,49 @@ class NexaOrchestrator:
             conversation.current_intent = None
             conversation.pending_questions = []
             conversation.collected_data = {}
+
+            # Extract time range for direct calendar availability check
+            range_match = re.search(
+                r"(?:between|from)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:and|to)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+                lower,
+            )
+            if range_match:
+                now = datetime.now(UTC)
+                target_date = now
+                weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+                for idx, day_name in enumerate(weekdays):
+                    if day_name in lower:
+                        current_weekday = now.weekday()
+                        days_ahead = (idx - current_weekday) % 7
+                        if days_ahead == 0:
+                            days_ahead = 7
+                        target_date = now + timedelta(days=days_ahead)
+                        break
+                if "tomorrow" in lower:
+                    target_date = now + timedelta(days=1)
+
+                t1 = range_match.group(1).strip()
+                t2 = range_match.group(2).strip()
+                if "pm" in t2 and not ("am" in t1 or "pm" in t1):
+                    t1 += " pm"
+                elif "am" in t2 and not ("am" in t1 or "pm" in t1):
+                    t1 += " am"
+
+                try:
+                    p1 = parse_datetime(t1)
+                    p2 = parse_datetime(t2)
+                    start_dt = target_date.replace(hour=p1.hour, minute=p1.minute, second=0, microsecond=0)
+                    end_dt = target_date.replace(hour=p2.hour, minute=p2.minute, second=0, microsecond=0)
+                    entities["is_conflict_check"] = True
+                    entities["check_start_iso"] = start_dt.isoformat()
+                    entities["check_end_iso"] = end_dt.isoformat()
+                    entities["check_display_range"] = (
+                        start_dt.strftime("%A, %b %d from %I:%M %p").replace(" 0", " ")
+                        + " to "
+                        + end_dt.strftime("%I:%M %p %Z").replace(" 0", " ")
+                    )
+                except Exception:
+                    pass
         elif is_task:
             intent = IntentType.CREATE_TASK
             conversation.current_intent = None

@@ -68,15 +68,23 @@ class NexaAgent:
 
         try:
             return await self.client.chat.completions.create(**kwargs)
-        except RateLimitError as exc:
-            logger.error("openai_rate_limited", error=str(exc))
-            raise AIError("OpenAI rate limit exceeded. Please retry in a few moments.") from exc
+        except (RateLimitError, APIError) as exc:
+            # If Gemini model is experiencing temporary high demand (503) or rate limit, fallback to gemini-3.5-flash
+            err_msg = str(exc)
+            if self.provider == "gemini" and ("503" in err_msg or "high demand" in err_msg.lower() or "overloaded" in err_msg.lower()):
+                fallback_model = "gemini-3.5-flash"
+                if kwargs.get("model") != fallback_model:
+                    logger.warning("gemini_high_demand_fallback", requested=kwargs.get("model"), fallback=fallback_model)
+                    kwargs["model"] = fallback_model
+                    try:
+                        return await self.client.chat.completions.create(**kwargs)
+                    except Exception as fb_exc:
+                        logger.error("gemini_fallback_failed", error=str(fb_exc))
+            logger.error("ai_service_error", error=err_msg)
+            raise AIError(f"AI service error: {err_msg}") from exc
         except APITimeoutError as exc:
             logger.error("openai_timeout", error=str(exc))
             raise AIError("AI request timed out. Please try again.") from exc
-        except APIError as exc:
-            logger.error("openai_api_error", error=str(exc))
-            raise AIError(f"OpenAI service error: {exc.message}") from exc
         except Exception as exc:
             logger.error("openai_unexpected_error", error=str(exc))
             raise AIError(f"Failed to communicate with AI agent: {exc}") from exc

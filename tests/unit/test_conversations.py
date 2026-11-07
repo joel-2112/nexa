@@ -94,3 +94,36 @@ async def test_relative_offset_meeting_workflow(auth_client: AsyncClient):
     assert "Meeting with" in data["message"]["content"]
     assert "fintech project" in data["message"]["content"]
     assert "Check calendar availability" in data["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_intent_switch_clears_pending_meeting_state(auth_client: AsyncClient):
+    """Verify that asking for a task or conflict query clears pending meeting questions."""
+    create_res = await auth_client.post("/api/v1/conversations", json={"title": "Pending Test"})
+    conv_id = create_res.json()["id"]
+
+    # 1. Ask a meeting question that leaves pending questions
+    msg1 = await auth_client.post(
+        f"/api/v1/conversations/{conv_id}/messages",
+        json={"content": "I want to schedule a meeting"},
+    )
+    assert msg1.status_code == 201
+    assert msg1.json()["clarification_needed"] is True
+
+    # 2. Switch to a task creation command - should NOT ask for meeting details!
+    msg2 = await auth_client.post(
+        f"/api/v1/conversations/{conv_id}/messages",
+        json={"content": "remind me in 15 minutes to review the budget"},
+    )
+    assert msg2.status_code == 201
+    data2 = msg2.json()
+    assert data2["action_plan_id"] is not None
+    assert "Review the budget" in data2["message"]["content"]
+
+    # 3. Test explicit cancel
+    msg3 = await auth_client.post(
+        f"/api/v1/conversations/{conv_id}/messages",
+        json={"content": "cancel"},
+    )
+    assert msg3.status_code == 201
+    assert "reset" in msg3.json()["message"]["content"].lower() or "cancel" in msg3.json()["message"]["content"].lower()

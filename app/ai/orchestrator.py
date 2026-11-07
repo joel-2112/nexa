@@ -49,6 +49,24 @@ class NexaOrchestrator:
         conversation.message_count += 1
         await self.db.flush()
 
+        # Check for explicit cancellation or context reset
+        lower_msg = user_message.lower().strip()
+        if lower_msg in ["cancel", "reset", "stop", "clear", "nevermind", "never mind", "forget it"]:
+            conversation.current_intent = None
+            conversation.collected_data = {}
+            conversation.pending_questions = []
+            await self.db.flush()
+            reply = "Understood. I've reset the active request and cleared our conversation context. What would you like to work on?"
+            assistant_msg = Message(
+                conversation_id=conversation.id,
+                role=MessageRole.assistant,
+                content=reply,
+            )
+            self.db.add(assistant_msg)
+            conversation.message_count += 1
+            await self.db.flush()
+            return OrchestratorResponse(response_text=reply)
+
         # 2. Extract or update collected state from message
         extracted = await self._analyze_intent_and_entities(user, conversation, user_message)
 
@@ -254,18 +272,58 @@ class NexaOrchestrator:
         return OrchestratorResponse(response_text=reply_text, executed_tools=executed_tools)
 
     async def _analyze_intent_and_entities(self, user: User, conversation: Conversation, text: str) -> ExtractedIntent:
-        """Deterministic entity and intent extractor with LLM or pattern fallbacks."""
-        lower = text.lower()
+        """Deterministic entity and intent extractor with priority overrides."""
+        lower = text.lower().strip()
         entities: dict[str, Any] = {}
 
-        # Only preserve active intent if actively answering pending follow-up questions
+        # 1. Explicit Conflict / Availability / Schedule Queries
+        is_conflict_or_query = any(
+            phrase in lower
+            for phrase in [
+                "conflict", "conflicts", "am i free", "are there any conflicts",
+                "check my schedule", "check my calendar", "what's on my schedule",
+                "what is on my schedule", "what do i have", "do i have any",
+                "free slots", "free time", "availability", "available",
+            ]
+        ) and not any(w in lower for w in ["schedule a meeting", "book a meeting", "set up a meeting"])
+
+        # 2. Explicit Task / Reminder Intent
+        is_task = any(
+            phrase in lower
+            for phrase in [
+                "remind me to", "remind me", "add task", "create task",
+                "task to", "have the task", "have a task", "todo", "to-do",
+                "check my email", "check email",
+            ]
+        ) and not ("meeting with" in lower or ("meeting" in lower and "@" in lower))
+
+        # 3. Explicit New Meeting Booking Request
+        is_new_meeting = (
+            any(phrase in lower for phrase in ["schedule a meeting", "schedule meeting", "book a meeting", "set up a meeting", "set up a call", "plan a meeting"])
+            or ("meeting with" in lower)
+            or ("call with" in lower)
+        )
+
         has_pending = bool(conversation.pending_questions)
-        if has_pending and conversation.current_intent == IntentType.SCHEDULE_MEETING.value:
+
+        if is_conflict_or_query:
+            intent = IntentType.GENERAL_QUERY
+            conversation.current_intent = None
+            conversation.pending_questions = []
+            conversation.collected_data = {}
+        elif is_task:
+            intent = IntentType.CREATE_TASK
+            conversation.current_intent = None
+            conversation.pending_questions = []
+            conversation.collected_data = {}
+        elif is_new_meeting:
+            intent = IntentType.SCHEDULE_MEETING
+            conversation.collected_data = {}
+            conversation.pending_questions = []
+        elif has_pending and conversation.current_intent == IntentType.SCHEDULE_MEETING.value:
             intent = IntentType.SCHEDULE_MEETING
         elif any(w in lower for w in ["meeting", "schedule", "meet", "call", "client", "appointment"]):
             intent = IntentType.SCHEDULE_MEETING
-        elif any(w in lower for w in ["task", "todo", "remind me", "remind", "prepare task", "check my email", "check email"]):
-            intent = IntentType.CREATE_TASK
         else:
             intent = IntentType.GENERAL_QUERY
 
@@ -317,16 +375,17 @@ class NexaOrchestrator:
         if email_match:
             entities["client_email"] = email_match.group(0)
 
-        # Check for client name
+        # Check for client name (clean any leading 'client ')
         client_match = re.search(
             r"(?:with|client(?:\s+is)?|name(?:\s+is)?)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)",
             text,
             re.IGNORECASE,
         )
         if client_match:
-            entities["client_name"] = client_match.group(1)
+            raw_name = client_match.group(1).strip()
+            clean_name = re.sub(r"^client\s+", "", raw_name, flags=re.IGNORECASE).strip()
+            entities["client_name"] = clean_name or raw_name
         elif not entities.get("client_name"):
-            # Check if pending question was client_name and message contains a 2-word capitalized name
             name_match = re.search(r"\b([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)\b", text)
             if name_match:
                 entities["client_name"] = name_match.group(1)
@@ -348,6 +407,13 @@ class NexaOrchestrator:
         if rel_match:
             entities["relative_offset_val"] = int(rel_match.group(1))
             entities["relative_offset_unit"] = rel_match.group(2)
+
+        # Weekday detection
+        weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        for day_name in weekdays:
+            if re.search(rf"\b{day_name}\b", lower):
+                entities["weekday"] = day_name
+                break
 
         # Relative date/time keywords
         if "tomorrow" in lower:
@@ -379,6 +445,7 @@ class NexaOrchestrator:
             data.get("start_time")
             or (data.get("date_relative") and data.get("time_raw"))
             or data.get("relative_offset_val")
+            or data.get("weekday")
         )
         if not has_time:
             missing.append("meeting_time")
@@ -411,6 +478,21 @@ class NexaOrchestrator:
                 start_dt = now + timedelta(days=val)
             else:
                 start_dt = now + timedelta(minutes=val)
+        elif data.get("weekday"):
+            day_name = data["weekday"]
+            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            target_idx = weekdays.index(day_name)
+            current_weekday = now.weekday()
+            days_ahead = (target_idx - current_weekday) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            start_dt = (now + timedelta(days=days_ahead)).replace(hour=10, minute=0, second=0, microsecond=0)
+            if data.get("time_raw"):
+                try:
+                    parsed_t = parse_datetime(data["time_raw"])
+                    start_dt = start_dt.replace(hour=parsed_t.hour, minute=parsed_t.minute)
+                except Exception:
+                    pass
         elif data.get("date_relative") == "tomorrow":
             start_dt = (now + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
             if data.get("time_raw"):
